@@ -184,6 +184,8 @@ if (DREAMCAST)
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_main.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_render_context.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_gbi.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_combiner.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_math.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_pvr_renderer.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_texture_cache.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp

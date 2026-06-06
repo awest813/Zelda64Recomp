@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include <kos.h>
 #include <dc/pvr.h>
@@ -22,6 +23,9 @@ namespace dreamcast::pvr {
 namespace {
 
 constexpr int PVR_LIST_INVALID = -1;
+constexpr uint8_t G_TX_WRAP = 0;
+constexpr uint8_t G_TX_MIRROR = 0x1;
+constexpr uint8_t G_TX_CLAMP = 0x2;
 
 bool needs_translucent(uint32_t argb0, uint32_t argb1, uint32_t argb2) {
     const uint32_t a0 = argb0 & 0xFF;
@@ -31,6 +35,19 @@ bool needs_translucent(uint32_t argb0, uint32_t argb1, uint32_t argb2) {
 }
 
 } // anonymous namespace
+
+bool Renderer::BatchKey::operator==(const BatchKey& other) const {
+    return list_type == other.list_type
+        && textured == other.textured
+        && translucent == other.translucent
+        && gouraud == other.gouraud
+        && texture_vram == other.texture_vram
+        && pvr_format == other.pvr_format
+        && tex_stride == other.tex_stride
+        && tex_height == other.tex_height
+        && cms == other.cms
+        && cmt == other.cmt;
+}
 
 Renderer::Renderer() = default;
 
@@ -86,33 +103,83 @@ void Renderer::ensure_list(int list_type) {
         return;
     }
 
+    flush_batch();
     close_list();
     pvr_list_begin(list_type);
     list_open_ = true;
     current_list_ = list_type;
+    batch_hdr_valid_ = false;
 }
 
 void Renderer::close_list() {
+    flush_batch();
     if (list_open_) {
         pvr_list_finish();
         list_open_ = false;
     }
     current_list_ = PVR_LIST_INVALID;
+    batch_hdr_valid_ = false;
+}
+
+void Renderer::flush_batch() {
+    if (!batch_hdr_valid_ || !list_open_) {
+        return;
+    }
+    pvr_prim(&batch_hdr_, sizeof(pvr_poly_hdr_t));
+    batch_hdr_valid_ = false;
+}
+
+void Renderer::apply_wrap_modes(pvr_poly_cxt_t& cxt, uint8_t cms, uint8_t cmt) const {
+    const bool clamp_u = (cms & G_TX_CLAMP) != 0;
+    const bool clamp_v = (cmt & G_TX_CLAMP) != 0;
+    if (clamp_u && clamp_v) {
+        cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
+    } else if (clamp_u) {
+        cxt.txr.uv_clamp = PVR_UVCLAMP_U;
+    } else if (clamp_v) {
+        cxt.txr.uv_clamp = PVR_UVCLAMP_V;
+    } else {
+        cxt.txr.uv_clamp = PVR_UVCLAMP_NONE;
+    }
+}
+
+void Renderer::begin_batch(const BatchKey& key) {
+    if (batch_hdr_valid_ && batch_key_ == key) {
+        return;
+    }
+
+    flush_batch();
+    batch_key_ = key;
+
+    pvr_poly_cxt_t cxt;
+    if (key.textured) {
+        pvr_poly_cxt_txr(&cxt, key.list_type, key.pvr_format, key.tex_stride, key.tex_height, key.texture_vram, PVR_FILTER_NONE);
+        apply_wrap_modes(cxt, key.cms, key.cmt);
+    } else {
+        pvr_poly_cxt_col(&cxt, key.list_type);
+    }
+
+    cxt.gen.shading = key.gouraud ? PVR_SHADE_GOURAUD : PVR_SHADE_FLAT;
+    cxt.gen.culling = PVR_CULLING_NONE;
+    cxt.depth.comparison = key.textured && !key.gouraud ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GEQUAL;
+    cxt.depth.write = key.translucent ? PVR_DEPTHWRITE_DISABLE : PVR_DEPTHWRITE_ENABLE;
+    if (key.translucent) {
+        cxt.blend.src = PVR_BLEND_SRCALPHA;
+        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+    }
+
+    pvr_poly_compile(&batch_hdr_, &cxt);
+    batch_hdr_valid_ = true;
 }
 
 void Renderer::clear_screen() {
-    pvr_poly_cxt_t cxt;
-    pvr_poly_cxt_col(&cxt, PVR_LIST_OP_POLY);
-    cxt.gen.shading = PVR_SHADE_FLAT;
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
-    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
-
-    pvr_poly_hdr_t hdr;
-    pvr_poly_compile(&hdr, &cxt);
-
-    ensure_list(PVR_LIST_OP_POLY);
-    pvr_prim(&hdr, sizeof(pvr_poly_hdr_t));
+    BatchKey key{};
+    key.list_type = PVR_LIST_OP_POLY;
+    key.gouraud = false;
+    key.translucent = false;
+    ensure_list(key.list_type);
+    begin_batch(key);
+    flush_batch();
 
     pvr_vertex_t vert{};
     vert.z = 1.0f;
@@ -137,6 +204,8 @@ void Renderer::clear_screen() {
     vert.x = static_cast<float>(DC_SCREEN_WIDTH);
     vert.y = static_cast<float>(DC_SCREEN_HEIGHT);
     pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    batch_hdr_valid_ = false;
 }
 
 void Renderer::begin_frame() {
@@ -150,6 +219,7 @@ void Renderer::begin_frame() {
     drew_geometry_ = false;
     current_list_ = PVR_LIST_INVALID;
     list_open_ = false;
+    batch_hdr_valid_ = false;
 
     update_mapping();
     clear_screen();
@@ -165,6 +235,7 @@ void Renderer::end_frame() {
     scene_active_ = false;
     drew_geometry_ = false;
     current_list_ = PVR_LIST_INVALID;
+    batch_hdr_valid_ = false;
 }
 
 void Renderer::submit_triangle(
@@ -180,49 +251,32 @@ void Renderer::submit_triangle(
     const bool use_translucent = translucent || needs_translucent(argb0, argb1, argb2);
     const int list_type = use_translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
 
-    pvr_poly_cxt_t cxt;
-    pvr_poly_cxt_col(&cxt, list_type);
-    cxt.gen.shading = PVR_SHADE_GOURAUD;
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
-    cxt.depth.write = use_translucent ? PVR_DEPTHWRITE_DISABLE : PVR_DEPTHWRITE_ENABLE;
-    if (use_translucent) {
-        cxt.blend.src = PVR_BLEND_SRCALPHA;
-        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
-    }
-
-    pvr_poly_hdr_t hdr;
-    pvr_poly_compile(&hdr, &cxt);
-
+    BatchKey key{};
+    key.list_type = list_type;
+    key.translucent = use_translucent;
+    key.gouraud = true;
     ensure_list(list_type);
-    pvr_prim(&hdr, sizeof(pvr_poly_hdr_t));
-
-    const float mx0 = map_x(x0);
-    const float my0 = map_y(y0);
-    const float mx1 = map_x(x1);
-    const float my1 = map_y(y1);
-    const float mx2 = map_x(x2);
-    const float my2 = map_y(y2);
+    begin_batch(key);
 
     pvr_vertex_t vert{};
     vert.oargb = 0;
 
     vert.flags = PVR_CMD_VERTEX;
-    vert.x = mx0;
-    vert.y = my0;
+    vert.x = map_x(x0);
+    vert.y = map_y(y0);
     vert.z = z0;
     vert.argb = argb0;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
-    vert.x = mx1;
-    vert.y = my1;
+    vert.x = map_x(x1);
+    vert.y = map_y(y1);
     vert.z = z1;
     vert.argb = argb1;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
     vert.flags = PVR_CMD_VERTEX_EOL;
-    vert.x = mx2;
-    vert.y = my2;
+    vert.x = map_x(x2);
+    vert.y = map_y(y2);
     vert.z = z2;
     vert.argb = argb2;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
@@ -249,23 +303,19 @@ void Renderer::submit_textured_triangle(
     const bool use_translucent = translucent || needs_translucent(argb0, argb1, argb2);
     const int list_type = use_translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
 
-    pvr_poly_cxt_t cxt;
-    pvr_poly_cxt_txr(&cxt, list_type, texture.pvr_format, texture.stride, texture.height, texture.vram, PVR_FILTER_NONE);
-    cxt.gen.shading = PVR_SHADE_GOURAUD;
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
-    cxt.depth.write = use_translucent ? PVR_DEPTHWRITE_DISABLE : PVR_DEPTHWRITE_ENABLE;
-    cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
-    if (use_translucent) {
-        cxt.blend.src = PVR_BLEND_SRCALPHA;
-        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
-    }
-
-    pvr_poly_hdr_t hdr;
-    pvr_poly_compile(&hdr, &cxt);
-
+    BatchKey key{};
+    key.list_type = list_type;
+    key.textured = true;
+    key.translucent = use_translucent;
+    key.gouraud = true;
+    key.texture_vram = texture.vram;
+    key.pvr_format = texture.pvr_format;
+    key.tex_stride = texture.stride;
+    key.tex_height = texture.height;
+    key.cms = texture.cms;
+    key.cmt = texture.cmt;
     ensure_list(list_type);
-    pvr_prim(&hdr, sizeof(pvr_poly_hdr_t));
+    begin_batch(key);
 
     pvr_vertex_t vert{};
     vert.oargb = 0;
@@ -304,7 +354,6 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
         begin_frame();
     }
 
-    // RDP rectangle coordinates are in 1/4-pixel units.
     const float x0 = static_cast<float>(ulx) / 4.0f;
     const float y0 = static_cast<float>(uly) / 4.0f;
     const float x1 = static_cast<float>(lrx) / 4.0f;
@@ -313,22 +362,12 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     const bool translucent = (argb & 0xFFu) < 255u;
     const int list_type = translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
 
-    pvr_poly_cxt_t cxt;
-    pvr_poly_cxt_col(&cxt, list_type);
-    cxt.gen.shading = PVR_SHADE_FLAT;
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
-    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
-    if (translucent) {
-        cxt.blend.src = PVR_BLEND_SRCALPHA;
-        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
-    }
-
-    pvr_poly_hdr_t hdr;
-    pvr_poly_compile(&hdr, &cxt);
-
+    BatchKey key{};
+    key.list_type = list_type;
+    key.translucent = translucent;
+    key.gouraud = false;
     ensure_list(list_type);
-    pvr_prim(&hdr, sizeof(pvr_poly_hdr_t));
+    begin_batch(key);
 
     const float mx0 = map_x(x0);
     const float my0 = map_y(y0);
@@ -393,23 +432,19 @@ void Renderer::submit_tex_rect(
     const bool use_translucent = translucent || ((argb & 0xFFu) < 255u);
     const int list_type = use_translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
 
-    pvr_poly_cxt_t cxt;
-    pvr_poly_cxt_txr(&cxt, list_type, texture.pvr_format, texture.stride, texture.height, texture.vram, PVR_FILTER_NONE);
-    cxt.gen.shading = PVR_SHADE_FLAT;
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
-    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
-    cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
-    if (use_translucent) {
-        cxt.blend.src = PVR_BLEND_SRCALPHA;
-        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
-    }
-
-    pvr_poly_hdr_t hdr;
-    pvr_poly_compile(&hdr, &cxt);
-
+    BatchKey key{};
+    key.list_type = list_type;
+    key.textured = true;
+    key.translucent = use_translucent;
+    key.gouraud = false;
+    key.texture_vram = texture.vram;
+    key.pvr_format = texture.pvr_format;
+    key.tex_stride = texture.stride;
+    key.tex_height = texture.height;
+    key.cms = texture.cms;
+    key.cmt = texture.cmt;
     ensure_list(list_type);
-    pvr_prim(&hdr, sizeof(pvr_poly_hdr_t));
+    begin_batch(key);
 
     const float mx0 = map_x(x0);
     const float my0 = map_y(y0);

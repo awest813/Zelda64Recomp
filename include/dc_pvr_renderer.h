@@ -5,6 +5,8 @@
 
 #include <cstdint>
 
+#include <dc/pvr.h>
+
 namespace dreamcast::tex {
 class Cache;
 struct Surface;
@@ -65,6 +67,21 @@ private:
         uint16_t fb_height = 240;
     };
 
+    struct BatchKey {
+        int list_type = -1;
+        bool textured = false;
+        bool translucent = false;
+        bool gouraud = true;
+        pvr_ptr_t texture_vram = 0;
+        uint32_t pvr_format = 0;
+        uint16_t tex_stride = 0;
+        uint16_t tex_height = 0;
+        uint8_t cms = 0;
+        uint8_t cmt = 0;
+
+        bool operator==(const BatchKey& other) const;
+    };
+
     tex::Cache* texture_cache_ = nullptr;
     uint32_t frame_index_ = 0;
 
@@ -73,12 +90,19 @@ private:
     bool list_open_ = false;
     int current_list_ = -1;
 
+    BatchKey batch_key_{};
+    bool batch_hdr_valid_ = false;
+    pvr_poly_hdr_t batch_hdr_{};
+
     ScreenMapping mapping_;
 
     void update_mapping();
     void clear_screen();
     void ensure_list(int list_type);
     void close_list();
+    void flush_batch();
+    void begin_batch(const BatchKey& key);
+    void apply_wrap_modes(pvr_poly_cxt_t& cxt, uint8_t cms, uint8_t cmt) const;
 
     float map_x(float n64_x) const;
     float map_y(float n64_y) const;
