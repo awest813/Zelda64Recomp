@@ -174,7 +174,7 @@ void maple_poll() {
                 //   II = intensity (motor power, 0x01 = minimum, 0x0F = maximum)
                 //   EE = frequency/decay (0x11 = standard)
                 uint8_t intensity = static_cast<uint8_t>(
-                    1 + (recomp::dc_rumble_strength * 14) / 100);
+                    1 + (recomp::dc_rumble_strength * 14 + 50) / 100);
                 uint32_t cmd = (0x00u << 24) | (0x11u << 16) |
                                (static_cast<uint32_t>(intensity) << 8) | 0x11u;
                 purupuru_rumble_raw(purupuru, cmd);
