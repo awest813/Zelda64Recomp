@@ -7,6 +7,7 @@
 
 #include "dc_gbi.h"
 #include "dc_pvr_renderer.h"
+#include "dc_texture_cache.h"
 
 #include <algorithm>
 #include <array>
@@ -95,7 +96,26 @@ constexpr uint32_t G_MDSFT_CYCLETYPE = 20;
 constexpr uint32_t G_CYC_FILL = 3u << G_MDSFT_CYCLETYPE;
 constexpr uint32_t G_CYC_COPY = 2u << G_MDSFT_CYCLETYPE;
 
+constexpr uint32_t G_IM_SIZ_4b = 0;
+constexpr uint32_t G_IM_SIZ_8b = 1;
 constexpr uint32_t G_IM_SIZ_16b = 2;
+constexpr uint32_t G_IM_SIZ_32b = 3;
+
+constexpr uint32_t G_IM_FMT_RGBA = 0;
+constexpr uint32_t G_IM_FMT_CI = 2;
+constexpr uint32_t G_IM_FMT_IA = 3;
+constexpr uint32_t G_IM_FMT_I = 4;
+
+constexpr uint8_t G_TX_RENDERTILE = 0;
+constexpr uint8_t G_TX_LOADTILE = 7;
+
+constexpr uint32_t G_TEXTURE_IMAGE_FRAC = 2;
+
+constexpr uint32_t G_CCMUX_TEXEL0 = 1;
+constexpr uint32_t G_CCMUX_TEXEL1 = 2;
+constexpr uint32_t G_CCMUX_PRIMITIVE = 3;
+constexpr uint32_t G_CCMUX_SHADE = 4;
+constexpr uint32_t G_CCMUX_ENVIRONMENT = 5;
 
 constexpr uint32_t RT64_HOOK_MAGIC = 0x525464;
 constexpr uint32_t RT64_HOOK_OP_ENABLE = 0x1;
@@ -176,6 +196,8 @@ struct TransformedVertex {
     float screen_x = 0.0f;
     float screen_y = 0.0f;
     float depth = 0.5f;
+    float tex_u = 0.0f;
+    float tex_v = 0.0f;
     float w = 1.0f;
     uint8_t r = 255;
     uint8_t g = 255;
@@ -236,9 +258,34 @@ static void mat4_transform(const float m[4][4], float x, float y, float z, float
 
 // ── Interpreter state ───────────────────────────────────────────────
 
+struct TextureImage {
+    const uint8_t* addr = nullptr;
+    uint8_t siz = G_IM_SIZ_16b;
+    uint16_t width = 0;
+};
+
+struct TileDescriptor {
+    uint8_t fmt = 0;
+    uint8_t siz = G_IM_SIZ_16b;
+    uint8_t cms = 0;
+    uint8_t cmt = 0;
+    uint16_t line_size_bytes = 0;
+    uint16_t uls = 0;
+    uint16_t ult = 0;
+    uint16_t lrs = 0;
+    uint16_t lrt = 0;
+};
+
+struct LoadedTextureSlot {
+    const uint8_t* addr = nullptr;
+    uint32_t size_bytes = 0;
+    bool valid = false;
+};
+
 struct GbiState {
     uint8_t* rdram = nullptr;
     pvr::Renderer* renderer = nullptr;
+    tex::Cache* texture_cache = nullptr;
 
     std::array<uint32_t, MAX_SEGMENTS> segments{};
     float model_matrix[4][4]{};
@@ -272,8 +319,18 @@ struct GbiState {
     uint32_t prim_color = 0xFFFFFFFF;
     uint32_t fill_color = 0;
     uint32_t env_color = 0xFFFFFFFF;
+    uint64_t combine_mode = 0;
 
+    TextureImage texture_to_load{};
+    TileDescriptor render_tile{};
+    std::array<LoadedTextureSlot, 2> loaded_textures{};
+    uint8_t load_tile_slot = 0;
+    const uint8_t* palette = nullptr;
+
+    uint16_t texture_scale_s = 0xFFFF;
+    uint16_t texture_scale_t = 0xFFFF;
     bool texture_on = false;
+    bool texture_changed = true;
     bool force_branch = true;
     uint8_t extended_opcode = 0;
 
@@ -315,6 +372,8 @@ struct GbiState {
         out.screen_y = (ty * -inv_w) * viewport.scale[1] + viewport.translate[1];
         const float ndc_z = tz * inv_w;
         out.depth = std::clamp((ndc_z + 1.0f) * 0.5f, 0.0f, 1.0f);
+        out.tex_u = static_cast<float>((static_cast<int32_t>(v.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
+        out.tex_v = static_cast<float>((static_cast<int32_t>(v.t) * static_cast<int32_t>(texture_scale_t)) >> 16);
         out.r = v.r;
         out.g = v.g;
         out.b = v.b;
@@ -322,11 +381,8 @@ struct GbiState {
         vtx_loaded[index] = 1;
     }
 
-    static uint32_t pack_argb(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-        return (static_cast<uint32_t>(a) << 24)
-             | (static_cast<uint32_t>(r) << 16)
-             | (static_cast<uint32_t>(g) << 8)
-             | static_cast<uint32_t>(b);
+    static uint8_t mul_u8(uint8_t a, uint8_t b) {
+        return static_cast<uint8_t>((static_cast<uint16_t>(a) * b) / 255u);
     }
 
     void unpack_color(uint32_t rgba, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) const {
@@ -334,6 +390,87 @@ struct GbiState {
         g = static_cast<uint8_t>((rgba >> 16) & 0xFF);
         b = static_cast<uint8_t>((rgba >> 8) & 0xFF);
         a = static_cast<uint8_t>(rgba & 0xFF);
+    }
+
+    bool combine_uses_texel0() const {
+        const uint32_t alpha = static_cast<uint32_t>(combine_mode & 0xFFFFFFFFu);
+        const uint32_t rgb = static_cast<uint32_t>((combine_mode >> 32) & 0xFFFFFFFFu);
+        auto uses_tex = [](uint32_t word) {
+            for (int i = 0; i < 4; i++) {
+                const uint32_t mux = (word >> (i * 3)) & 7u;
+                if (mux == G_CCMUX_TEXEL0 || mux == G_CCMUX_TEXEL1) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        return uses_tex(rgb) || uses_tex(alpha);
+    }
+
+    uint32_t vertex_combine_factor(uint8_t vr, uint8_t vg, uint8_t vb, uint8_t va) const {
+        // Approximate (A-B)*C+D for common MODULATE/DECAL paths using shade/prim/env.
+        uint8_t pr, pg, pb, pa, er, eg, eb, ea;
+        unpack_color(prim_color, pr, pg, pb, pa);
+        unpack_color(env_color, er, eg, eb, ea);
+
+        uint8_t r = vr;
+        uint8_t g = vg;
+        uint8_t b = vb;
+        uint8_t a = va;
+
+        const uint32_t rgb = static_cast<uint32_t>((combine_mode >> 32) & 0xFFFFFFFFu);
+        const uint32_t d_mux = (rgb >> 9) & 7u;
+        const uint32_t c_mux = (rgb >> 6) & 7u;
+
+        if (c_mux == G_CCMUX_PRIMITIVE || d_mux == G_CCMUX_PRIMITIVE) {
+            r = mul_u8(r, pr);
+            g = mul_u8(g, pg);
+            b = mul_u8(b, pb);
+            a = mul_u8(a, pa);
+        }
+        if (c_mux == G_CCMUX_ENVIRONMENT || d_mux == G_CCMUX_ENVIRONMENT) {
+            r = mul_u8(r, er);
+            g = mul_u8(g, eg);
+            b = mul_u8(b, eb);
+            a = mul_u8(a, ea);
+        }
+        return pack_argb(r, g, b, a);
+    }
+
+    tex::Surface resolve_texture() {
+        if (texture_cache == nullptr || !loaded_textures[0].valid) {
+            return {};
+        }
+        tex::LoadedTexture tex{};
+        tex.addr = loaded_textures[0].addr;
+        tex.size_bytes = loaded_textures[0].size_bytes;
+
+        tex::TileState tile{};
+        tile.fmt = render_tile.fmt;
+        tile.siz = render_tile.siz;
+        tile.cms = render_tile.cms;
+        tile.cmt = render_tile.cmt;
+        tile.uls = render_tile.uls;
+        tile.ult = render_tile.ult;
+        tile.lrs = render_tile.lrs;
+        tile.lrt = render_tile.lrt;
+        tile.line_size_bytes = render_tile.line_size_bytes;
+
+        return texture_cache->upload(tex, tile, palette);
+    }
+
+    void normalize_uv(float raw_u, float raw_v, float& u, float& v) const {
+        const float tex_w = static_cast<float>(std::max<uint16_t>((render_tile.lrs - render_tile.uls + 4) / 4, 1));
+        const float tex_h = static_cast<float>(std::max<uint16_t>((render_tile.lrt - render_tile.ult + 4) / 4, 1));
+        u = (raw_u - render_tile.uls * 8.0f) / 32.0f / tex_w;
+        v = (raw_v - render_tile.ult * 8.0f) / 32.0f / tex_h;
+    }
+
+    static uint32_t pack_argb(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        return (static_cast<uint32_t>(a) << 24)
+             | (static_cast<uint32_t>(r) << 16)
+             | (static_cast<uint32_t>(g) << 8)
+             | static_cast<uint32_t>(b);
     }
 
     void fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
@@ -416,13 +553,60 @@ struct GbiState {
             a0 = a1 = a2 = pa;
         }
 
-        const bool translucent = (a0 < 255) || (a1 < 255) || (a2 < 255);
-        renderer->submit_triangle(
-            v0.screen_x, v0.screen_y, v0.depth, pack_argb(r0, g0, b0, a0),
-            v1.screen_x, v1.screen_y, v1.depth, pack_argb(r1, g1, b1, a1),
-            v2.screen_x, v2.screen_y, v2.depth, pack_argb(r2, g2, b2, a2),
-            translucent
-        );
+        const uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0);
+        const uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1);
+        const uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2);
+        const bool translucent = ((c0 | c1 | c2) & 0xFFu) < 255u;
+
+        const bool use_texture = texture_on && loaded_textures[0].valid
+            && (combine_mode == 0 || combine_uses_texel0());
+        if (use_texture) {
+            const tex::Surface surface = resolve_texture();
+            float tu0, tv0, tu1, tv1, tu2, tv2;
+            normalize_uv(v0.tex_u, v0.tex_v, tu0, tv0);
+            normalize_uv(v1.tex_u, v1.tex_v, tu1, tv1);
+            normalize_uv(v2.tex_u, v2.tex_v, tu2, tv2);
+            renderer->submit_textured_triangle(
+                v0.screen_x, v0.screen_y, v0.depth, tu0, tv0, c0,
+                v1.screen_x, v1.screen_y, v1.depth, tu1, tv1, c1,
+                v2.screen_x, v2.screen_y, v2.depth, tu2, tv2, c2,
+                surface, translucent
+            );
+        } else {
+            renderer->submit_triangle(
+                v0.screen_x, v0.screen_y, v0.depth, c0,
+                v1.screen_x, v1.screen_y, v1.depth, c1,
+                v2.screen_x, v2.screen_y, v2.depth, c2,
+                translucent
+            );
+        }
+    }
+
+    void draw_tex_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
+        if (renderer == nullptr) {
+            return;
+        }
+
+        ulx += rect_align.left_offset;
+        uly += rect_align.top_offset;
+        lrx += rect_align.right_offset;
+        lry += rect_align.bottom_offset;
+
+        if (flip) {
+            dsdx = static_cast<int16_t>(-dsdx);
+            dtdy = static_cast<int16_t>(-dtdy);
+        }
+
+        const int16_t width = flip ? static_cast<int16_t>(lry - uly) : static_cast<int16_t>(lrx - ulx);
+        const int16_t height = flip ? static_cast<int16_t>(lrx - ulx) : static_cast<int16_t>(lry - uly);
+        const float lrs = static_cast<float>(((uls << 7) + dsdx * width) >> 7);
+        const float lrt = static_cast<float>(((ult << 7) + dtdy * height) >> 7);
+
+        const tex::Surface surface = resolve_texture();
+        const uint32_t vtx_color = vertex_combine_factor(255, 255, 255, 255);
+        const bool translucent = (vtx_color & 0xFFu) < 255u;
+
+        renderer->submit_tex_rect(ulx, uly, lrx, lry, static_cast<float>(uls), static_cast<float>(ult), lrs, lrt, surface, vtx_color, translucent);
     }
 
     void draw_tri(uint8_t a, uint8_t b, uint8_t c) {
@@ -583,6 +767,8 @@ struct GbiState {
     }
 
     static void dl_texture(GbiState& s, DisplayList*& dl) {
+        s.texture_scale_s = static_cast<uint16_t>(dl->p1(16, 16));
+        s.texture_scale_t = static_cast<uint16_t>(dl->p1(0, 16));
         s.texture_on = dl->p0(1, 7) != 0;
     }
 
@@ -686,6 +872,125 @@ struct GbiState {
         s.env_color = dl->w1;
     }
 
+    static void dl_setcombine(GbiState& s, DisplayList*& dl) {
+        s.combine_mode = (static_cast<uint64_t>(dl->w1) << 32) | dl->w0;
+    }
+
+    static void dl_settimg(GbiState& s, DisplayList*& dl) {
+        const uint32_t address = s.from_segmented(dl->w1);
+        s.texture_to_load.addr = s.rdram + (address & 0x00FFFFFF);
+        s.texture_to_load.siz = static_cast<uint8_t>(dl->p0(19, 2));
+        s.texture_to_load.width = static_cast<uint16_t>(dl->p0(0, 12) + 1);
+    }
+
+    static void dl_settile(GbiState& s, DisplayList*& dl) {
+        const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
+        if (tile == G_TX_RENDERTILE) {
+            s.render_tile.fmt = static_cast<uint8_t>(dl->p0(21, 3));
+            s.render_tile.siz = static_cast<uint8_t>(dl->p0(19, 2));
+            s.render_tile.line_size_bytes = static_cast<uint16_t>(dl->p0(9, 9) * 8);
+            s.render_tile.cms = static_cast<uint8_t>(dl->p1(8, 2));
+            s.render_tile.cmt = static_cast<uint8_t>(dl->p1(18, 2));
+            s.texture_changed = true;
+        }
+        if (tile == G_TX_LOADTILE) {
+            s.load_tile_slot = static_cast<uint8_t>(dl->p0(0, 9) / 256);
+        }
+    }
+
+    static void dl_settilesize(GbiState& s, DisplayList*& dl) {
+        const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
+        if (tile == G_TX_RENDERTILE) {
+            s.render_tile.uls = static_cast<uint16_t>(dl->p0(12, 12));
+            s.render_tile.ult = static_cast<uint16_t>(dl->p0(0, 12));
+            s.render_tile.lrs = static_cast<uint16_t>(dl->p1(12, 12));
+            s.render_tile.lrt = static_cast<uint16_t>(dl->p1(0, 12));
+            s.texture_changed = true;
+        }
+    }
+
+    static void dl_loadblock(GbiState& s, DisplayList*& dl) {
+        const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
+        if (tile != G_TX_LOADTILE) {
+            return;
+        }
+
+        const uint16_t lrs = static_cast<uint16_t>(dl->p1(12, 12));
+        uint32_t word_size_shift = 0;
+        switch (s.texture_to_load.siz) {
+        case G_IM_SIZ_4b:
+        case G_IM_SIZ_8b:
+            word_size_shift = 0;
+            break;
+        case G_IM_SIZ_16b:
+            word_size_shift = 1;
+            break;
+        case G_IM_SIZ_32b:
+            word_size_shift = 2;
+            break;
+        default:
+            break;
+        }
+
+        const uint32_t size_bytes = (static_cast<uint32_t>(lrs) + 1u) << word_size_shift;
+        const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
+        s.loaded_textures[slot].addr = s.texture_to_load.addr;
+        s.loaded_textures[slot].size_bytes = size_bytes;
+        s.loaded_textures[slot].valid = true;
+        s.loaded_textures[0] = s.loaded_textures[slot];
+        s.texture_changed = true;
+    }
+
+    static void dl_loadtile(GbiState& s, DisplayList*& dl) {
+        const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
+        if (tile != G_TX_LOADTILE) {
+            return;
+        }
+
+        const uint16_t uls = static_cast<uint16_t>(dl->p0(12, 12));
+        const uint16_t ult = static_cast<uint16_t>(dl->p0(0, 12));
+        const uint16_t lrs = static_cast<uint16_t>(dl->p1(12, 12));
+        const uint16_t lrt = static_cast<uint16_t>(dl->p1(0, 12));
+
+        uint32_t word_size_shift = 0;
+        switch (s.texture_to_load.siz) {
+        case G_IM_SIZ_4b:
+        case G_IM_SIZ_8b:
+            word_size_shift = 0;
+            break;
+        case G_IM_SIZ_16b:
+            word_size_shift = 1;
+            break;
+        case G_IM_SIZ_32b:
+            word_size_shift = 2;
+            break;
+        default:
+            break;
+        }
+
+        const uint32_t size_bytes = (((static_cast<uint32_t>(lrs) >> G_TEXTURE_IMAGE_FRAC) + 1u)
+            * ((static_cast<uint32_t>(lrt) >> G_TEXTURE_IMAGE_FRAC) + 1u)) << word_size_shift;
+
+        const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
+        s.loaded_textures[slot].addr = s.texture_to_load.addr;
+        s.loaded_textures[slot].size_bytes = size_bytes;
+        s.loaded_textures[slot].valid = true;
+        s.loaded_textures[0] = s.loaded_textures[slot];
+
+        s.render_tile.uls = uls;
+        s.render_tile.ult = ult;
+        s.render_tile.lrs = lrs;
+        s.render_tile.lrt = lrt;
+        s.texture_changed = true;
+    }
+
+    static void dl_loadtlut(GbiState& s, DisplayList*& dl) {
+        const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
+        if (tile == G_TX_LOADTILE && s.texture_to_load.siz == G_IM_SIZ_16b) {
+            s.palette = s.texture_to_load.addr;
+        }
+    }
+
     static void dl_fillrect(GbiState& s, DisplayList*& dl) {
         s.fill_rect(
             static_cast<int32_t>(dl->p1(12, 12)),
@@ -706,9 +1011,21 @@ struct GbiState {
     }
 
     static void dl_texrect(GbiState& s, DisplayList*& dl) {
-        // Textured rectangles require TMEM; not yet implemented.
-        (void)s;
-        dl += 2;
+        const int32_t ulx = static_cast<int32_t>(dl->p1(12, 12));
+        const int32_t uly = static_cast<int32_t>(dl->p1(0, 12));
+        const int32_t lrx = static_cast<int32_t>(dl->p0(12, 12));
+        const int32_t lry = static_cast<int32_t>(dl->p0(0, 12));
+        dl++;
+
+        const int16_t uls = static_cast<int16_t>(dl->p1(16, 16));
+        const int16_t ult = static_cast<int16_t>(dl->p1(0, 16));
+        dl++;
+
+        const int16_t dsdx = static_cast<int16_t>(dl->p1(16, 16));
+        const int16_t dtdy = static_cast<int16_t>(dl->p1(0, 16));
+        const bool flip = static_cast<uint8_t>(dl->w0 >> 24) == G_TEXRECTFLIP;
+
+        s.draw_tex_rect(ulx, uly, lrx, lry, uls, ult, dsdx, dtdy, flip);
     }
 
     static void dl_extended(GbiState& s, DisplayList*& dl) {
@@ -823,13 +1140,13 @@ struct GbiState {
         gbi_dispatch[G_RDPTILESYNC] = dl_noop;
         gbi_dispatch[G_RDPFULLSYNC] = dl_noop;
         gbi_dispatch[G_SETZIMG] = dl_noop;
-        gbi_dispatch[G_SETTIMG] = dl_noop;
-        gbi_dispatch[G_SETCOMBINE] = dl_noop;
-        gbi_dispatch[G_SETTILE] = dl_noop;
-        gbi_dispatch[G_LOADBLOCK] = dl_noop;
-        gbi_dispatch[G_LOADTILE] = dl_noop;
-        gbi_dispatch[G_SETTILESIZE] = dl_noop;
-        gbi_dispatch[G_LOADTLUT] = dl_noop;
+        gbi_dispatch[G_SETTIMG] = dl_settimg;
+        gbi_dispatch[G_SETCOMBINE] = dl_setcombine;
+        gbi_dispatch[G_SETTILE] = dl_settile;
+        gbi_dispatch[G_LOADBLOCK] = dl_loadblock;
+        gbi_dispatch[G_LOADTILE] = dl_loadtile;
+        gbi_dispatch[G_SETTILESIZE] = dl_settilesize;
+        gbi_dispatch[G_LOADTLUT] = dl_loadtlut;
     }
 
     void run_display_list(GbiState& state, DisplayList* dl) {
@@ -891,9 +1208,11 @@ void Interpreter::reset() {
     }
 
     pvr::Renderer* renderer = impl_->state.renderer;
+    tex::Cache* texture_cache = impl_->state.texture_cache;
     GbiState& s = impl_->state;
     s = GbiState{};
     s.renderer = renderer;
+    s.texture_cache = texture_cache;
     mat4_identity(s.model_matrix);
     mat4_identity(s.proj_matrix);
     mat4_identity(s.model_stack[0]);
@@ -908,6 +1227,13 @@ void Interpreter::set_renderer(pvr::Renderer* renderer) {
         reset();
     }
     impl_->state.renderer = renderer;
+}
+
+void Interpreter::set_texture_cache(tex::Cache* cache) {
+    if (impl_ == nullptr) {
+        reset();
+    }
+    impl_->state.texture_cache = cache;
 }
 
 void Interpreter::process_display_list(uint8_t* rdram, const OSTask* task) {

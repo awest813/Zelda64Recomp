@@ -5,9 +5,9 @@
 // APIs to drive the PowerVR2 tile-based deferred renderer.
 //
 // Display lists are high-level-emulated (F3DZEX2) and geometry is submitted
-// directly to the PVR tile accelerator (SM64 DC port architecture). Many N64
-// RDP features (texturing, combiners, multi-cycle blending) are not yet
-// implemented.
+// directly to the PVR tile accelerator (SM64 DC port architecture). N64
+// texturing and basic combiners are partially implemented; S2DEX2 remains
+// work in progress.
 
 #ifdef DREAMCAST
 
@@ -29,6 +29,7 @@
 #include "dreamcast_platform.h"
 #include "dc_gbi.h"
 #include "dc_pvr_renderer.h"
+#include "dc_texture_cache.h"
 
 namespace {
 
@@ -117,39 +118,7 @@ uint32_t align_up(uint32_t value, uint32_t alignment) {
     return (value + alignment - 1u) / alignment * alignment;
 }
 
-// ── Texture cache ───────────────────────────────────────────────────
-// The PowerVR2 has 8 MB of VRAM shared between the framebuffer and textures.
-// We maintain a simple LRU texture cache to manage VRAM pressure.
-
-struct TextureCacheEntry {
-    uint32_t n64_addr;       // Address in N64 RDRAM
-    uint32_t hash;           // Simple content hash for invalidation
-    pvr_ptr_t pvr_tex;       // VRAM pointer allocated via pvr_mem_malloc
-    uint16_t width;
-    uint16_t height;
-    uint32_t pvr_format;     // PVR texture format (e.g., PVR_TXRFMT_RGB565)
-    uint32_t last_used_frame;
-};
-
-constexpr size_t MAX_TEXTURE_CACHE_ENTRIES = 256;
-constexpr size_t TEXTURE_CACHE_VRAM_BUDGET = 4 * 1024 * 1024; // 4 MB for textures
-
-static std::array<TextureCacheEntry, MAX_TEXTURE_CACHE_ENTRIES> texture_cache{};
-static size_t texture_cache_count = 0;
-static size_t texture_cache_vram_used = 0;
-static uint32_t current_frame = 0;
-
-// Simple hash for texture data
-uint32_t hash_texture_data(const uint8_t* data, size_t size) {
-    uint32_t hash = 0x811c9dc5u; // FNV-1a offset basis
-    for (size_t i = 0; i < size; i++) {
-        hash ^= data[i];
-        hash *= 0x01000193u; // FNV-1a prime
-    }
-    return hash;
-}
-
-// ── N64 texture format conversion ───────────────────────────────────
+// ── N64 framebuffer format conversion (VI blit fallback) ──────────────
 // Convert N64 RGBA16 (5551) to PVR ARGB1555
 void convert_rgba16_to_argb1555(const uint16_t* src, uint16_t* dst, size_t pixel_count) {
     for (size_t i = 0; i < pixel_count; i++) {
@@ -241,6 +210,8 @@ private:
 
     dreamcast::gbi::Interpreter gbi_;
     dreamcast::pvr::Renderer pvr_renderer_;
+    dreamcast::tex::Cache texture_cache_;
+    uint32_t frame_index_ = 0;
 };
 
 PVRContext::PVRContext(uint8_t* rdram, ultramodern::renderer::WindowHandle /*window_handle*/, bool developer_mode)
@@ -291,6 +262,10 @@ void PVRContext::init_pvr() {
     cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
     pvr_poly_compile(&poly_hdr_translucent_, &cxt);
 
+    pvr_renderer_.set_texture_cache(&texture_cache_);
+    gbi_.set_renderer(&pvr_renderer_);
+    gbi_.set_texture_cache(&texture_cache_);
+
     initialized_ = true;
     fprintf(stdout, "[DC] PVR renderer initialized (%dx%d)\n", DC_SCREEN_WIDTH, DC_SCREEN_HEIGHT);
 }
@@ -318,14 +293,7 @@ void PVRContext::release_framebuffer_texture() {
 }
 
 void PVRContext::flush_texture_cache() {
-    for (size_t i = 0; i < texture_cache_count; i++) {
-        if (texture_cache[i].pvr_tex != 0) {
-            pvr_mem_free(texture_cache[i].pvr_tex);
-            texture_cache[i].pvr_tex = 0;
-        }
-    }
-    texture_cache_count = 0;
-    texture_cache_vram_used = 0;
+    texture_cache_.flush();
 }
 
 bool PVRContext::update_config(
@@ -343,8 +311,8 @@ void PVRContext::enable_instant_present() {
 void PVRContext::send_dl(const OSTask* task) {
     // Begin the PVR scene on the first display list of the frame; subsequent
     // Gfx tasks append geometry before update_screen() presents.
+    pvr_renderer_.set_frame_index(frame_index_);
     pvr_renderer_.begin_frame();
-    gbi_.set_renderer(&pvr_renderer_);
     process_display_list(task);
 }
 
@@ -358,7 +326,7 @@ void PVRContext::update_screen() {
         render_framebuffer_to_screen();
         pvr_scene_finish();
     }
-    current_frame++;
+    frame_index_++;
 }
 
 uint32_t PVRContext::get_display_framerate() const {

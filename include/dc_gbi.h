@@ -11,6 +11,10 @@ namespace dreamcast::pvr {
 class Renderer;
 }
 
+namespace dreamcast::tex {
+class Cache;
+}
+
 namespace dreamcast::gbi {
 
 // F3DZEX2 display list high-level emulator for the Dreamcast port.
@@ -26,6 +30,7 @@ public:
 
     void reset();
     void set_renderer(pvr::Renderer* renderer);
+    void set_texture_cache(tex::Cache* cache);
     void process_display_list(uint8_t* rdram, const OSTask* task);
 
 private:
