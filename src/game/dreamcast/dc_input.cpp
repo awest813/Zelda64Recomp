@@ -389,7 +389,9 @@ void set_background_input_mode(BackgroundInputMode mode) {
 // get_n64_input() above, so the binding tables are intentionally empty.
 // config.cpp uses these to initialise the binding arrays on startup.
 
-const recomp::DefaultN64Mappings recomp::default_n64_keyboard_mappings = {};
-const recomp::DefaultN64Mappings recomp::default_n64_controller_mappings = {};
+namespace recomp {
+const DefaultN64Mappings default_n64_keyboard_mappings = {};
+const DefaultN64Mappings default_n64_controller_mappings = {};
+} // namespace recomp
 
 #endif // DREAMCAST

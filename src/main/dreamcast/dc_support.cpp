@@ -155,7 +155,7 @@ size_t vmu_free_blocks() {
         return 0;
     }
 
-    memcard_state_t* state = reinterpret_cast<memcard_state_t*>(maple_dev_status(vmu));
+    memcard_state_t* state = static_cast<memcard_state_t*>(maple_dev_status(vmu));
     if (state == nullptr) {
         return 0;
     }
