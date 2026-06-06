@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cmath>
+#include <algorithm>
 #include <memory>
 #include <array>
 #include <vector>
@@ -26,6 +28,91 @@
 #include "dreamcast_platform.h"
 
 namespace {
+
+// VI control flags (mirrored from ultramodern/events.cpp and RT64).
+constexpr uint32_t VI_CTRL_TYPE_BLANK = 0;
+constexpr uint32_t VI_CTRL_TYPE_16 = 0x00002;
+constexpr uint32_t VI_CTRL_TYPE_32 = 0x00003;
+constexpr uint32_t VI_CTRL_SERRATE_ON = 0x00040;
+
+struct DecodedVI {
+    bool valid = false;
+    bool visible = false;
+    uint32_t origin = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    bool is_32bit = false;
+};
+
+float vi_x_scale_float(uint32_t x_scale) {
+    return (x_scale != 0) ? (1024.0f / static_cast<float>(x_scale)) : 1.0f;
+}
+
+float vi_y_scale_float(uint32_t y_scale) {
+    return (y_scale != 0) ? (1024.0f / static_cast<float>(y_scale)) : 1.0f;
+}
+
+DecodedVI decode_vi(const ultramodern::renderer::ViRegs& regs) {
+    DecodedVI vi{};
+
+    const uint32_t type = regs.VI_STATUS_REG & 0x3;
+    const uint32_t h_start = regs.VI_H_START_REG & 0x3FF;
+    vi.visible = (type != VI_CTRL_TYPE_BLANK) && (h_start > 0);
+    if (!vi.visible) {
+        return vi;
+    }
+
+    const uint32_t width = regs.VI_WIDTH_REG & 0xFFF;
+    const uint32_t v_start = regs.VI_V_START_REG & 0x3FF;
+    const uint32_t v_end = (regs.VI_V_START_REG >> 16) & 0x3FF;
+    const bool serrate = (regs.VI_STATUS_REG & VI_CTRL_SERRATE_ON) != 0;
+
+    uint32_t fb_width = width;
+    if (serrate) {
+        const uint32_t h_end = (regs.VI_H_START_REG >> 16) & 0x3FF;
+        const float estimated_width = static_cast<float>(h_end - h_start) / vi_x_scale_float(regs.VI_X_SCALE_REG & 0xFFF);
+        constexpr float interlaced_tolerance = 1.875f;
+        if (estimated_width < (static_cast<float>(width) / interlaced_tolerance)) {
+            fb_width = width / 2;
+        }
+    }
+
+    const float y_scale = vi_y_scale_float(regs.VI_Y_SCALE_REG & 0xFFF);
+    uint32_t fb_height = static_cast<uint32_t>(std::lround(
+        static_cast<float>(v_end - v_start) / (2.0f * y_scale * (static_cast<float>(fb_width) / static_cast<float>(width)))
+    ));
+
+    // RT64 adds a couple of rows to account for filtering and alignment.
+    constexpr uint32_t extra_rows = 2;
+    constexpr uint32_t divisor = 4;
+    fb_height += extra_rows;
+    fb_height = static_cast<uint32_t>(std::lround(static_cast<float>(fb_height) / divisor)) * divisor;
+
+    if (fb_width == 0 || fb_height == 0) {
+        return vi;
+    }
+
+    uint32_t origin = regs.VI_ORIGIN_REG & 0xFFFFFF;
+    if (type >= VI_CTRL_TYPE_16) {
+        const bool interlaced_step = serrate && ((regs.VI_V_CURRENT_LINE_REG & 0x1) != 0);
+        const uint32_t bytes_per_pixel = (type == VI_CTRL_TYPE_32) ? 4u : 2u;
+        const uint32_t row_offset = width * bytes_per_pixel * (interlaced_step ? 2u : 1u);
+        if (origin >= row_offset) {
+            origin -= row_offset;
+        }
+    }
+
+    vi.origin = origin;
+    vi.width = fb_width;
+    vi.height = fb_height;
+    vi.is_32bit = (type == VI_CTRL_TYPE_32);
+    vi.valid = true;
+    return vi;
+}
+
+uint32_t align_up(uint32_t value, uint32_t alignment) {
+    return (value + alignment - 1u) / alignment * alignment;
+}
 
 // ── Texture cache ───────────────────────────────────────────────────
 // The PowerVR2 has 8 MB of VRAM shared between the framebuffer and textures.
@@ -74,14 +161,15 @@ void convert_rgba16_to_argb1555(const uint16_t* src, uint16_t* dst, size_t pixel
     }
 }
 
-// Convert N64 RGBA32 to PVR RGB565 (dropping alpha)
-void convert_rgba32_to_rgb565(const uint32_t* src, uint16_t* dst, size_t pixel_count) {
+// Convert N64 RGBA32 (RA GB byte order) to PVR ARGB1555.
+void convert_rgba32_to_argb1555(const uint32_t* src, uint16_t* dst, size_t pixel_count) {
     for (size_t i = 0; i < pixel_count; i++) {
         uint32_t pixel = src[i];
         uint16_t r = ((pixel >> 24) & 0xFF) >> 3;
-        uint16_t g = ((pixel >> 16) & 0xFF) >> 2;
+        uint16_t g = ((pixel >> 16) & 0xFF) >> 3;
         uint16_t b = ((pixel >> 8) & 0xFF) >> 3;
-        dst[i] = (r << 11) | (g << 5) | b;
+        uint16_t a = (pixel & 0xFF) ? 0x8000u : 0u;
+        dst[i] = a | (r << 10) | (g << 5) | b;
     }
 }
 
@@ -125,18 +213,27 @@ private:
     bool developer_mode_ = false;
     uint32_t display_framerate_ = 60;
 
-    // N64 VI register state (copied from the task)
-    uint32_t vi_origin_ = 0;
-    uint32_t vi_width_ = 320;
-    uint32_t vi_height_ = 240;
+    // Cached N64 framebuffer texture in PVR VRAM.
+    pvr_ptr_t fb_texture_ = 0;
+    uint32_t fb_tex_width_ = 0;
+    uint32_t fb_tex_height_ = 0;
+    uint32_t fb_tex_stride_ = 0;
+    std::vector<uint16_t> fb_upload_buffer_;
 
     // PVR rendering state
     pvr_poly_hdr_t poly_hdr_opaque_;
     pvr_poly_hdr_t poly_hdr_translucent_;
+    pvr_poly_hdr_t poly_hdr_textured_;
+    bool textured_hdr_valid_ = false;
 
     void init_pvr();
     void flush_texture_cache();
+    void release_framebuffer_texture();
+    bool ensure_framebuffer_texture(uint32_t width, uint32_t height);
+    bool upload_framebuffer_texture(const DecodedVI& vi);
+    void compile_textured_header();
     void render_framebuffer_to_screen();
+    void render_solid_quad(uint32_t argb);
     void process_display_list(const OSTask* task);
 };
 
@@ -195,10 +292,23 @@ void PVRContext::init_pvr() {
 void PVRContext::shutdown() {
     if (!initialized_) return;
 
+    release_framebuffer_texture();
     flush_texture_cache();
     pvr_shutdown();
     initialized_ = false;
     fprintf(stdout, "[DC] PVR renderer shut down\n");
+}
+
+void PVRContext::release_framebuffer_texture() {
+    if (fb_texture_ != 0) {
+        pvr_mem_free(fb_texture_);
+        fb_texture_ = 0;
+    }
+    fb_tex_width_ = 0;
+    fb_tex_height_ = 0;
+    fb_tex_stride_ = 0;
+    textured_hdr_valid_ = false;
+    fb_upload_buffer_.clear();
 }
 
 void PVRContext::flush_texture_cache() {
@@ -249,52 +359,179 @@ float PVRContext::get_resolution_scale() const {
     return 1.0f;
 }
 
-void PVRContext::render_framebuffer_to_screen() {
-    // Read the N64 framebuffer from RDRAM and blit it to the PVR screen
-    // as a textured quad. This is a fallback path; the proper path would
-    // intercept individual RDP draw calls in process_display_list().
+bool PVRContext::ensure_framebuffer_texture(uint32_t width, uint32_t height) {
+    const uint32_t stride = align_up(width, 32);
+    if (fb_texture_ != 0 && fb_tex_width_ == width && fb_tex_height_ == height && fb_tex_stride_ == stride) {
+        return true;
+    }
 
-    if (rdram_ == nullptr || vi_origin_ == 0) return;
+    release_framebuffer_texture();
 
-    // For the initial implementation, we render the N64 framebuffer as a
-    // full-screen textured quad. The framebuffer is assumed to be RGBA16
-    // at the resolution specified by VI registers.
-    //
-    // TODO: Replace this with proper RDP command processing that submits
-    // individual triangles/rectangles to PVR polygon lists.
+    const size_t tex_bytes = static_cast<size_t>(stride) * height * sizeof(uint16_t);
+    const size_t padded_bytes = align_up(static_cast<uint32_t>(tex_bytes), 32);
+    fb_texture_ = pvr_mem_malloc(padded_bytes);
+    if (fb_texture_ == 0) {
+        fprintf(stderr, "[DC] Failed to allocate %zu bytes for framebuffer texture\n", padded_bytes);
+        return false;
+    }
 
+    fb_tex_width_ = width;
+    fb_tex_height_ = height;
+    fb_tex_stride_ = stride;
+    fb_upload_buffer_.assign(padded_bytes / sizeof(uint16_t), 0);
+    textured_hdr_valid_ = false;
+    return true;
+}
+
+bool PVRContext::upload_framebuffer_texture(const DecodedVI& vi) {
+    if (rdram_ == nullptr || !vi.valid) {
+        return false;
+    }
+
+    if (!ensure_framebuffer_texture(vi.width, vi.height)) {
+        return false;
+    }
+
+    const uint32_t n64_stride_pixels = vi.width;
+    fb_upload_buffer_.assign(static_cast<size_t>(fb_tex_stride_) * fb_tex_height_, 0);
+
+    if (vi.is_32bit) {
+        const uint32_t* src = reinterpret_cast<const uint32_t*>(rdram_ + vi.origin);
+        for (uint32_t y = 0; y < vi.height; y++) {
+            const uint32_t* row_src = src + static_cast<size_t>(y) * n64_stride_pixels;
+            uint16_t* row_dst = fb_upload_buffer_.data() + static_cast<size_t>(y) * fb_tex_stride_;
+            convert_rgba32_to_argb1555(row_src, row_dst, vi.width);
+        }
+    } else {
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(rdram_ + vi.origin);
+        for (uint32_t y = 0; y < vi.height; y++) {
+            const uint16_t* row_src = src + static_cast<size_t>(y) * n64_stride_pixels;
+            uint16_t* row_dst = fb_upload_buffer_.data() + static_cast<size_t>(y) * fb_tex_stride_;
+            convert_rgba16_to_argb1555(row_src, row_dst, vi.width);
+        }
+    }
+
+    const size_t upload_bytes = static_cast<size_t>(fb_tex_stride_) * fb_tex_height_ * sizeof(uint16_t);
+    const size_t padded_bytes = align_up(static_cast<uint32_t>(upload_bytes), 32);
+    pvr_txr_set_stride(fb_tex_stride_);
+    pvr_txr_load(fb_upload_buffer_.data(), fb_texture_, padded_bytes);
+    return true;
+}
+
+void PVRContext::compile_textured_header() {
+    pvr_poly_cxt_t cxt;
+    pvr_poly_cxt_col(&cxt, PVR_LIST_OP_POLY);
+    cxt.gen.culling = PVR_CULLING_NONE;
+    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+    cxt.txr.enable = true;
+    cxt.txr.format = PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED | PVR_TXRFMT_X32_STRIDE;
+    cxt.txr.filter = PVR_FILTER_NONE;
+    cxt.txr.mipmap = false;
+    cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
+    cxt.txr.width = static_cast<int>(fb_tex_stride_);
+    cxt.txr.height = static_cast<int>(fb_tex_height_);
+    cxt.txr.base = fb_texture_;
+    pvr_poly_compile(&poly_hdr_textured_, &cxt);
+    textured_hdr_valid_ = true;
+}
+
+void PVRContext::render_solid_quad(uint32_t argb) {
     pvr_list_begin(PVR_LIST_OP_POLY);
     pvr_prim(&poly_hdr_opaque_, sizeof(pvr_poly_hdr_t));
 
-    // Draw a simple colored quad as a placeholder
-    pvr_vertex_t vert;
+    pvr_vertex_t vert{};
+    vert.z = 1.0f;
+    vert.argb = argb;
+    vert.oargb = 0;
 
-    // Top-left
     vert.flags = PVR_CMD_VERTEX;
     vert.x = 0.0f;
     vert.y = 0.0f;
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    vert.x = static_cast<float>(DC_SCREEN_WIDTH);
+    vert.y = 0.0f;
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    vert.flags = PVR_CMD_VERTEX;
+    vert.x = 0.0f;
+    vert.y = static_cast<float>(DC_SCREEN_HEIGHT);
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    vert.flags = PVR_CMD_VERTEX_EOL;
+    vert.x = static_cast<float>(DC_SCREEN_WIDTH);
+    vert.y = static_cast<float>(DC_SCREEN_HEIGHT);
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    pvr_list_finish();
+}
+
+void PVRContext::render_framebuffer_to_screen() {
+    const ultramodern::renderer::ViRegs* vi_regs = ultramodern::renderer::get_vi_regs();
+    if (vi_regs == nullptr) {
+        render_solid_quad(0xFF000000);
+        return;
+    }
+
+    const DecodedVI vi = decode_vi(*vi_regs);
+    if (!vi.visible) {
+        render_solid_quad(0xFF000000);
+        return;
+    }
+
+    if (!upload_framebuffer_texture(vi)) {
+        render_solid_quad(0xFF000000);
+        return;
+    }
+
+    if (!textured_hdr_valid_) {
+        compile_textured_header();
+    }
+
+    const float scale = std::min(
+        static_cast<float>(DC_SCREEN_WIDTH) / static_cast<float>(vi.width),
+        static_cast<float>(DC_SCREEN_HEIGHT) / static_cast<float>(vi.height)
+    );
+    const float draw_w = static_cast<float>(vi.width) * scale;
+    const float draw_h = static_cast<float>(vi.height) * scale;
+    const float offset_x = (static_cast<float>(DC_SCREEN_WIDTH) - draw_w) * 0.5f;
+    const float offset_y = (static_cast<float>(DC_SCREEN_HEIGHT) - draw_h) * 0.5f;
+    const float u_max = static_cast<float>(vi.width) / static_cast<float>(fb_tex_stride_);
+
+    pvr_list_begin(PVR_LIST_OP_POLY);
+    pvr_prim(&poly_hdr_textured_, sizeof(pvr_poly_hdr_t));
+
+    pvr_vertex_t vert{};
     vert.z = 1.0f;
+    vert.argb = 0xFFFFFFFF;
+    vert.oargb = 0;
+
+    vert.flags = PVR_CMD_VERTEX;
+    vert.x = offset_x;
+    vert.y = offset_y;
     vert.u = 0.0f;
     vert.v = 0.0f;
-    vert.argb = 0xFF000040; // Dark blue placeholder
-    vert.oargb = 0;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
-    // Top-right
-    vert.x = DC_SCREEN_WIDTH;
-    vert.y = 0.0f;
+    vert.x = offset_x + draw_w;
+    vert.y = offset_y;
+    vert.u = u_max;
+    vert.v = 0.0f;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
-    // Bottom-left
     vert.flags = PVR_CMD_VERTEX;
-    vert.x = 0.0f;
-    vert.y = DC_SCREEN_HEIGHT;
+    vert.x = offset_x;
+    vert.y = offset_y + draw_h;
+    vert.u = 0.0f;
+    vert.v = 1.0f;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
-    // Bottom-right (end of strip)
     vert.flags = PVR_CMD_VERTEX_EOL;
-    vert.x = DC_SCREEN_WIDTH;
-    vert.y = DC_SCREEN_HEIGHT;
+    vert.x = offset_x + draw_w;
+    vert.y = offset_y + draw_h;
+    vert.u = u_max;
+    vert.v = 1.0f;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
     pvr_list_finish();
@@ -303,36 +540,22 @@ void PVRContext::render_framebuffer_to_screen() {
 void PVRContext::process_display_list(const OSTask* task) {
     // TODO: Implement N64 RDP display list processing.
     //
+    // The presentation path (update_screen -> render_framebuffer_to_screen)
+    // already reads the N64 framebuffer from RDRAM using VI registers and
+    // blits it to the PVR output. However, without RDP command processing
+    // here the framebuffer will not contain rendered game content.
+    //
     // This function should parse the display list pointed to by
     // task->t.data_ptr in RDRAM and translate RDP commands to PVR
     // polygon submissions. The major command categories to handle:
     //
-    // 1. Triangles (G_TRI1, G_TRI2): Convert N64 vertex data
-    //    (position, color, texcoord) to pvr_vertex_t and submit
-    //    via pvr_prim().
-    //
-    // 2. Texture rectangles (G_TEXRECT): Draw axis-aligned
-    //    textured quads.
-    //
-    // 3. Fill rectangles (G_FILLRECT): Solid color rectangles.
-    //
-    // 4. Texture loading (G_LOADTLUT, G_LOADBLOCK, G_LOADTILE):
-    //    Load textures from RDRAM into the PVR texture cache,
-    //    converting formats as needed.
-    //
-    // 5. Render mode / combiner (G_SETCOMBINE, G_SETOTHERMODE):
-    //    Map N64 blending modes to PVR blend settings as closely
-    //    as possible.
-    //
-    // 6. Matrix operations (G_MTX, G_POPMTX): Transform vertices
-    //    on the SH-4 CPU (the PVR has no hardware T&L).
-    //
-    // 7. Framebuffer operations (G_SETCOLORIMAGE, G_SETDEPTHIMAGE):
-    //    Track the current color/depth buffer targets.
-    //
-    // For the initial port, this function is a stub that relies on
-    // render_framebuffer_to_screen() to display the N64 framebuffer
-    // directly.
+    // 1. Triangles (G_TRI1, G_TRI2)
+    // 2. Texture rectangles (G_TEXRECT)
+    // 3. Fill rectangles (G_FILLRECT)
+    // 4. Texture loading (G_LOADTLUT, G_LOADBLOCK, G_LOADTILE)
+    // 5. Render mode / combiner (G_SETCOMBINE, G_SETOTHERMODE)
+    // 6. Matrix operations (G_MTX, G_POPMTX)
+    // 7. Framebuffer operations (G_SETCOLORIMAGE, G_SETDEPTHIMAGE)
 
     (void)task;
 }

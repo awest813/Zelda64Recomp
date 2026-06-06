@@ -122,7 +122,7 @@ Place the game ROM on the disc as `/cd/rom.z64`.
 ### Important Notes
 
 - **This port is highly experimental.** The Dreamcast has only 16 MB of RAM and a 200 MHz SH-4 CPU — performance is expected to be challenging.
-- The RT64 renderer is replaced with a PVR (PowerVR2) renderer that is currently a stub. Full RDP command processing has not been implemented yet.
+- The RT64 renderer is replaced with a PVR (PowerVR2) renderer. The presentation path reads the N64 framebuffer from RDRAM (via VI registers) and blits it to the screen, but full RDP display list processing has not been implemented yet.
 - The RmlUi menu system is replaced with a minimal BIOS-font-based menu.
 - The mod system is disabled on Dreamcast.
 - Save data is stored on VMU (Visual Memory Unit).
