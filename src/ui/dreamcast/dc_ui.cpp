@@ -59,16 +59,13 @@ constexpr int MENU_PADDING = 20;
 constexpr int MENU_ITEM_SPACING = 4;
 
 void draw_bios_text(int x, int y, uint32_t color, const char* text) {
-    // KOS bios_font_draw_str renders directly to the framebuffer
-    // For PVR rendering we would need to render to a texture first.
-    // This is a simplified implementation that draws during the PVR scene.
+    // KOS bios_font_draw_str renders directly to the framebuffer.
+    // vram_s is a KOS-provided pointer to the 16-bit VRAM framebuffer
+    // (defined in <dc/video.h> as: extern uint16 *vram_s).
     //
     // TODO: Implement proper PVR-based text rendering by:
     // 1. Pre-rendering the BIOS font glyphs to a PVR texture atlas
     // 2. Drawing textured quads for each character
-    //
-    // For now, use bios_font_draw_str which writes to VRAM directly
-    // (only works in certain video modes).
     (void)color;
     bios_font_draw_str(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH, 0, text);
 }

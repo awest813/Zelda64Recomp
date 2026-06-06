@@ -35,6 +35,9 @@ static std::atomic<size_t> ring_read_pos{0};
 static snd_stream_hnd_t stream_handle = SND_STREAM_INVALID;
 
 static uint32_t current_sample_rate = 48000;
+// Volume scaling factor applied to all queued samples.
+// TODO: Wire this to zelda64::get_main_volume() once the config system is
+// fully integrated on Dreamcast.
 static float volume_scale = 1.0f;
 
 size_t ring_available() {

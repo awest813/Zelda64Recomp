@@ -159,7 +159,7 @@ void PVRContext::init_pvr() {
           PVR_BINSIZE_16,  // Translucent polygons
           PVR_BINSIZE_0,   // Translucent modifier volumes (disabled)
           PVR_BINSIZE_0 }, // Punch-through polygons (disabled)
-        DC_VRAM_SIZE,      // Vertex buffer size (use all available)
+        512 * 1024,        // Vertex buffer size (512 KB; rest of VRAM for textures/FB)
         0,                 // No DMA
         0,                 // No FSAA
         0                  // Disable translucent auto-sort (we sort manually)
@@ -282,6 +282,7 @@ void PVRContext::render_framebuffer_to_screen() {
 
     // Top-right
     vert.x = DC_SCREEN_WIDTH;
+    vert.y = 0.0f;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
     // Bottom-left
@@ -293,6 +294,7 @@ void PVRContext::render_framebuffer_to_screen() {
     // Bottom-right (end of strip)
     vert.flags = PVR_CMD_VERTEX_EOL;
     vert.x = DC_SCREEN_WIDTH;
+    vert.y = DC_SCREEN_HEIGHT;
     pvr_prim(&vert, sizeof(pvr_vertex_t));
 
     pvr_list_finish();

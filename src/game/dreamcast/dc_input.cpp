@@ -163,9 +163,14 @@ void maple_poll() {
         maple_device_t* purupuru = maple_enum_type(0, MAPLE_FUNC_PURUPURU);
         if (purupuru != nullptr) {
             if (should_rumble) {
-                // Duration = continuous, effect = default rumble
+                // Puru-puru raw command: 0x00110111
+                // Bits [31:24] = 0x00: special effects (none)
+                // Bits [23:16] = 0x11: duration (continuous)
+                // Bits [15:8]  = 0x01: effect intensity (low)
+                // Bits [7:0]   = 0x11: frequency + decay
                 purupuru_rumble_raw(purupuru, 0x00110111);
             } else {
+                // Stop rumble: all zeros
                 purupuru_rumble_raw(purupuru, 0x00000000);
             }
         }

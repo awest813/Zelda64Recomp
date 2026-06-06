@@ -147,8 +147,10 @@ bool vmu_delete(const char* filename) {
 }
 
 size_t vmu_free_blocks() {
-    // TODO: Query VMU for actual free space via maple
-    return 128; // Conservative estimate
+    // TODO: Query VMU for actual free space via maple_dev_status()
+    // on a MAPLE_FUNC_MEMCARD device. Default VMUs have 200 blocks
+    // total, but many are used by other saves.
+    return 20; // Conservative default; enough for a single save file
 }
 
 // ── GD-ROM access ───────────────────────────────────────────────────
