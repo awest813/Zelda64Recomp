@@ -75,3 +75,55 @@ Voilà! You should now have a `Zelda64Recompiled` executable in the build direct
 
 > [!IMPORTANT]
 > In the game itself, you should be using a standard ROM, not the decompressed one.
+
+## Building for Dreamcast (Experimental)
+
+The Dreamcast port targets the Sega Dreamcast hardware using [KallistiOS (KOS)](https://github.com/KallistiOS/KallistiOS) as the OS/SDK.
+
+### Prerequisites
+
+1. **KallistiOS toolchain**: Follow the [KOS build guide](https://github.com/KallistiOS/KallistiOS/wiki/Getting-Started) to install the `sh-elf` cross-compiler and build KOS.
+2. Set environment variables:
+   ```bash
+   export KOS_BASE=/path/to/kos
+   export KOS_CC_BASE=/path/to/sh-elf  # e.g., /opt/toolchains/dc/sh-elf
+   ```
+3. Complete steps 1–4 above (clone, dependencies, ROM, C code generation) on a PC first — the recompiler runs on the host, not on Dreamcast.
+
+### Building
+
+```bash
+cmake -S . -B build-dreamcast \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/Toolchains/dreamcast.cmake \
+    -DKOS_BASE=$KOS_BASE \
+    -DKOS_CC_BASE=$KOS_CC_BASE \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build-dreamcast --target Zelda64Recompiled -j$(nproc)
+```
+
+### Creating a Disc Image
+
+After building, create a bootable GD-ROM disc image:
+
+```bash
+cd build-dreamcast
+# Scramble the binary (required for Dreamcast boot)
+scramble 1ST_READ.BIN 1ST_READ.BIN
+# Create IP.BIN (bootstrap)
+makeip /path/to/ip.txt IP.BIN
+# Create disc image
+mkdcdisc -e 1ST_READ.BIN -o zelda64recomp.cdi -n "ZELDA64 RECOMP"
+```
+
+Place the game ROM on the disc as `/cd/rom.z64`.
+
+### Important Notes
+
+- **This port is highly experimental.** The Dreamcast has only 16 MB of RAM and a 200 MHz SH-4 CPU — performance is expected to be challenging.
+- The RT64 renderer is replaced with a PVR (PowerVR2) renderer that is currently a stub. Full RDP command processing has not been implemented yet.
+- The RmlUi menu system is replaced with a minimal BIOS-font-based menu.
+- The mod system is disabled on Dreamcast.
+- Save data is stored on VMU (Visual Memory Unit).
+- SDL2 is not used; input comes directly from the Dreamcast maple bus.
