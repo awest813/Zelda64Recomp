@@ -32,6 +32,7 @@
 #include <dc/maple/purupuru.h>
 
 #include "recomp_input.h"
+#include "recomp_ui.h"
 #include "ultramodern/input.hpp"
 #include "dreamcast_platform.h"
 
@@ -88,8 +89,8 @@ constexpr uint16_t N64_BTN_CL      = 0x0002;
 constexpr uint16_t N64_BTN_CR      = 0x0001;
 
 // Convert DC joystick raw value (-128..127) to float (-1.0..1.0)
-float normalize_stick(int raw) {
-    constexpr float deadzone = 0.15f;
+// deadzone is a fraction in [0.0, 1.0]; values within the deadzone return 0.
+float normalize_stick(int raw, float deadzone) {
     float val = static_cast<float>(raw) / 128.0f;
     if (val > 1.0f) val = 1.0f;
     if (val < -1.0f) val = -1.0f;
@@ -98,7 +99,7 @@ float normalize_stick(int raw) {
     if (std::fabs(val) < deadzone) {
         return 0.0f;
     }
-    // Rescale outside deadzone to 0..1
+    // Rescale outside deadzone so the usable range spans 0..1
     float sign = (val > 0.0f) ? 1.0f : -1.0f;
     return sign * (std::fabs(val) - deadzone) / (1.0f - deadzone);
 }
@@ -148,8 +149,11 @@ void maple_poll() {
 
     dc_controller.connected = true;
     dc_controller.buttons = state->buttons;
-    dc_controller.joy_x = normalize_stick(state->joyx);
-    dc_controller.joy_y = normalize_stick(-state->joyy); // Invert Y for N64 convention
+
+    // Apply the user-configured deadzone (stored as an integer percentage).
+    float deadzone = recomp::dc_joystick_deadzone / 100.0f;
+    dc_controller.joy_x = normalize_stick(state->joyx, deadzone);
+    dc_controller.joy_y = normalize_stick(-state->joyy, deadzone); // Invert Y for N64 convention
     dc_controller.trigger_l = static_cast<float>(state->ltrig) / 255.0f;
     dc_controller.trigger_r = static_cast<float>(state->rtrig) / 255.0f;
 
@@ -164,12 +168,16 @@ void maple_poll() {
         maple_device_t* purupuru = maple_enum_type(0, MAPLE_FUNC_PURUPURU);
         if (purupuru != nullptr) {
             if (should_rumble) {
-                // Puru-puru raw command: 0x00110111
-                // Bits [31:24] = 0x00: special effects (none)
-                // Bits [23:16] = 0x11: duration (continuous)
-                // Bits [15:8]  = 0x01: effect intensity (low)
-                // Bits [7:0]   = 0x11: frequency + decay
-                purupuru_rumble_raw(purupuru, 0x00110111);
+                // Map dc_rumble_strength (0–100) to puru-puru intensity (0x01–0x0F).
+                // Puru-puru raw command layout: 0x00 DD II EE
+                //   DD = duration (0x11 = continuous)
+                //   II = intensity (motor power, 0x01 = minimum, 0x0F = maximum)
+                //   EE = frequency/decay (0x11 = standard)
+                uint8_t intensity = static_cast<uint8_t>(
+                    1 + (recomp::dc_rumble_strength * 14) / 100);
+                uint32_t cmd = (0x00u << 24) | (0x11u << 16) |
+                               (static_cast<uint32_t>(intensity) << 8) | 0x11u;
+                purupuru_rumble_raw(purupuru, cmd);
             } else {
                 // Stop rumble: all zeros
                 purupuru_rumble_raw(purupuru, 0x00000000);
@@ -361,9 +369,10 @@ void config_menu_set_cont_or_kb(bool /*cont_interacted*/) {
 }
 
 // ── Input enable flags ───────────────────────────────────────────────
-// On Dreamcast, input is always enabled (no menu overlay that grabs input).
+// Game input is disabled while a menu context is visible so that joystick
+// and button events are consumed by the UI and not forwarded to the game.
 bool game_input_disabled() {
-    return false;
+    return recompui::is_any_context_shown();
 }
 
 bool all_input_disabled() {

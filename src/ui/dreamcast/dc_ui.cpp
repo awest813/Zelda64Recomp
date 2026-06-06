@@ -58,15 +58,16 @@ constexpr int MENU_PADDING = 20;
 constexpr int MENU_ITEM_SPACING = 4;
 
 void draw_bios_text(int x, int y, uint32_t color, const char* text) {
-    // KOS bios_font_draw_str renders directly to the framebuffer.
-    // vram_s is a KOS-provided pointer to the 16-bit VRAM framebuffer
-    // (defined in <dc/video.h> as: extern uint16 *vram_s).
-    //
-    // TODO: Implement proper PVR-based text rendering by:
-    // 1. Pre-rendering the BIOS font glyphs to a PVR texture atlas
-    // 2. Drawing textured quads for each character
-    (void)color;
-    bios_font_draw_str(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH, 0, text);
+    // Convert ARGB32 color to RGB565 for the Dreamcast framebuffer.
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    uint16_t fg565 = static_cast<uint16_t>(
+        ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    // Use a solid dark background (black, 0x0000) behind each character.
+    uint16_t bg565 = 0x0000u;
+    bios_font_draw_str_ex(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH,
+                          fg565, bg565, text);
 }
 
 // A fixed ContextId slot for the single Dreamcast menu context.
@@ -259,11 +260,9 @@ void drop_files(const std::list<std::filesystem::path>& /*file_list*/) {}
 void render_menu_overlay() {
     if (!current_menu.visible) return;
 
-    // Render using the Dreamcast BIOS bitmap font.
-    // TODO: Replace with PVR polygon-based rendering for anti-aliased text:
-    // - Background semi-transparent dark quad
-    // - Pre-baked font glyph texture atlas
-    // - Highlight bar for selected item
+    // Render using the Dreamcast BIOS bitmap font with RGB565 colors.
+    // Text is drawn directly to the framebuffer; a future improvement would
+    // be to composite via a PVR semi-transparent background quad.
 
     int y = MENU_PADDING;
 
