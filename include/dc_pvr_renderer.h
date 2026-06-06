@@ -93,6 +93,8 @@ private:
     BatchKey batch_key_{};
     bool batch_hdr_valid_ = false;
     pvr_poly_hdr_t batch_hdr_{};
+    pvr_dr_state_t dr_state_{};
+    bool dr_active_ = false;
 
     ScreenMapping mapping_;
 
@@ -102,6 +104,9 @@ private:
     void close_list();
     void flush_batch();
     void begin_batch(const BatchKey& key);
+    void begin_dr();
+    void end_dr();
+    void submit_vertex_dr(const pvr_vertex_t& vert);
     void apply_wrap_modes(pvr_poly_cxt_t& cxt, uint8_t cms, uint8_t cmt) const;
 
     float map_x(float n64_x) const;

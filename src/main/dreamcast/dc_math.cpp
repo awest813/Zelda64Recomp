@@ -40,22 +40,10 @@ void mat4_mul(const float a[4][4], const float b[4][4], float out[4][4]) {
 }
 
 void mat4_transform(const float m[4][4], float x, float y, float z, float& ox, float& oy, float& oz, float& ow) {
-#if defined(DC_HAS_SH4ZAM)
-    shz_vec3_t in{x, y, z};
-    shz_vec3_t out{};
-    shz_mat4x4_t matrix{};
-    std::memcpy(&matrix, m, sizeof(matrix));
-    shz_mat4x4_transform_vec3(&out, &matrix, &in);
-    ox = out.x;
-    oy = out.y;
-    oz = out.z;
-    ow = m[3][0] * x + m[3][1] * y + m[3][2] * z + m[3][3];
-#else
     ox = m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3];
     oy = m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3];
     oz = m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3];
     ow = m[3][0] * x + m[3][1] * y + m[3][2] * z + m[3][3];
-#endif
 }
 
 } // namespace dreamcast::math

@@ -171,17 +171,12 @@ uint32_t evaluate(uint64_t combine_mode, const Inputs& in, bool cycle2) {
     Cycle alpha1{};
     decode_cycles(combine_mode, rgb0, alpha0, rgb1, alpha1);
 
-    ColorSource combined{};
-    combined.r = eval_cycle_rgb(rgb0, in, combined).r;
-    combined.g = combined.r;
-    combined.b = combined.r;
-    combined.a = eval_cycle_alpha(alpha0, in, combined);
+    ColorSource empty{};
+    ColorSource combined = eval_cycle_rgb(rgb0, in, empty);
+    combined.a = eval_cycle_alpha(alpha0, in, empty);
 
     if (cycle2) {
-        const ColorSource cycle1_rgb = eval_cycle_rgb(rgb1, in, combined);
-        combined.r = cycle1_rgb.r;
-        combined.g = cycle1_rgb.r;
-        combined.b = cycle1_rgb.r;
+        combined = eval_cycle_rgb(rgb1, in, combined);
         combined.a = eval_cycle_alpha(alpha1, in, combined);
     }
 

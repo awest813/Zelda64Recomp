@@ -113,6 +113,7 @@ void Renderer::ensure_list(int list_type) {
 
 void Renderer::close_list() {
     flush_batch();
+    end_dr();
     if (list_open_) {
         pvr_list_finish();
         list_open_ = false;
@@ -125,8 +126,30 @@ void Renderer::flush_batch() {
     if (!batch_hdr_valid_ || !list_open_) {
         return;
     }
+    end_dr();
     pvr_prim(&batch_hdr_, sizeof(pvr_poly_hdr_t));
     batch_hdr_valid_ = false;
+}
+
+void Renderer::begin_dr() {
+    if (!dr_active_) {
+        pvr_dr_init(&dr_state_);
+        dr_active_ = true;
+    }
+}
+
+void Renderer::end_dr() {
+    if (dr_active_) {
+        pvr_dr_finish();
+        dr_active_ = false;
+    }
+}
+
+void Renderer::submit_vertex_dr(const pvr_vertex_t& vert) {
+    begin_dr();
+    pvr_vertex_t* dst = static_cast<pvr_vertex_t*>(pvr_dr_target(dr_state_));
+    *dst = vert;
+    pvr_dr_commit(dst);
 }
 
 void Renderer::apply_wrap_modes(pvr_poly_cxt_t& cxt, uint8_t cms, uint8_t cmt) const {
@@ -266,20 +289,20 @@ void Renderer::submit_triangle(
     vert.y = map_y(y0);
     vert.z = z0;
     vert.argb = argb0;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.x = map_x(x1);
     vert.y = map_y(y1);
     vert.z = z1;
     vert.argb = argb1;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX_EOL;
     vert.x = map_x(x2);
     vert.y = map_y(y2);
     vert.z = z2;
     vert.argb = argb2;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     drew_geometry_ = true;
 }
@@ -327,7 +350,7 @@ void Renderer::submit_textured_triangle(
     vert.u = u0;
     vert.v = v0;
     vert.argb = argb0;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.x = map_x(x1);
     vert.y = map_y(y1);
@@ -335,7 +358,7 @@ void Renderer::submit_textured_triangle(
     vert.u = u1;
     vert.v = v1;
     vert.argb = argb1;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX_EOL;
     vert.x = map_x(x2);
@@ -344,7 +367,7 @@ void Renderer::submit_textured_triangle(
     vert.u = u2;
     vert.v = v2;
     vert.argb = argb2;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     drew_geometry_ = true;
 }
@@ -382,21 +405,21 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     vert.flags = PVR_CMD_VERTEX;
     vert.x = mx0;
     vert.y = my0;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.x = mx1;
     vert.y = my0;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX;
     vert.x = mx0;
     vert.y = my1;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX_EOL;
     vert.x = mx1;
     vert.y = my1;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     drew_geometry_ = true;
 }
@@ -461,27 +484,27 @@ void Renderer::submit_tex_rect(
     vert.y = my0;
     vert.u = u0;
     vert.v = v0;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.x = mx1;
     vert.y = my0;
     vert.u = u1;
     vert.v = v0;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX;
     vert.x = mx0;
     vert.y = my1;
     vert.u = u0;
     vert.v = v1;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX_EOL;
     vert.x = mx1;
     vert.y = my1;
     vert.u = u1;
     vert.v = v1;
-    pvr_prim(&vert, sizeof(pvr_vertex_t));
+    submit_vertex_dr(vert);
 
     drew_geometry_ = true;
 }

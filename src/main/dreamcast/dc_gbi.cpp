@@ -152,6 +152,12 @@ constexpr uint8_t G_EX_PUSHVIEWPORT_V1 = 0x15;
 constexpr uint8_t G_EX_POPVIEWPORT_V1 = 0x16;
 constexpr uint8_t G_EX_PUSHSCISSOR_V1 = 0x17;
 constexpr uint8_t G_EX_POPSCISSOR_V1 = 0x18;
+constexpr uint8_t G_EX_MATRIXGROUP_V1 = 0x0C;
+constexpr uint8_t G_EX_POPMATRIXGROUP_V1 = 0x0D;
+constexpr uint8_t G_EX_SETREFRESHRATE_V1 = 0x09;
+constexpr uint8_t G_EX_SETRDRAMEXTENDED_V1 = 0x2C;
+
+constexpr uint8_t G_S2DEX_OBJ_RECTANGLE = 0x0C;
 
 constexpr size_t MAX_VERTICES = 256;
 constexpr size_t MAX_SEGMENTS = 16;
@@ -429,12 +435,13 @@ struct GbiState {
         ScissorRect sc = scissor_stack[scissor_stack_size - 1];
         if ((scissor_align.left_origin & 0xF00) != G_EX_ORIGIN_NONE
             || (scissor_align.right_origin & 0xF00) != G_EX_ORIGIN_NONE) {
-            sc.ulx = static_cast<int32_t>(origin_offset_x(scissor_align.left_origin, scissor_align.ulx_offset) * 4.0f)
-                + scissor_align.ulx_bound * 4;
-            sc.uly = scissor_align.uly_bound * 4 + scissor_align.uly_offset;
-            sc.lrx = static_cast<int32_t>(origin_offset_x(scissor_align.right_origin, scissor_align.lrx_offset) * 4.0f)
-                + scissor_align.lrx_bound * 4;
-            sc.lry = scissor_align.lry_bound * 4 + scissor_align.lry_offset;
+            // Offsets and bounds arrive in 1/4-pixel units from the extended DL macros.
+            const int32_t left_anchor = static_cast<int32_t>(origin_offset_x(scissor_align.left_origin, 0) * 4.0f);
+            const int32_t right_anchor = static_cast<int32_t>((origin_offset_x(scissor_align.right_origin, 0) + fb_width() - REF_WIDTH) * 4.0f);
+            sc.ulx = left_anchor + scissor_align.ulx_bound + scissor_align.ulx_offset;
+            sc.uly = scissor_align.uly_bound + scissor_align.uly_offset;
+            sc.lrx = right_anchor + scissor_align.lrx_bound + scissor_align.lrx_offset;
+            sc.lry = scissor_align.lry_bound + scissor_align.lry_offset;
             sc.enabled = true;
         }
         return sc;
@@ -1013,6 +1020,31 @@ struct GbiState {
         return true;
     }
 
+    static void push_matrix_group(GbiState& s, bool projection) {
+        if (projection) {
+            if (s.proj_stack_size < MATRIX_STACK_SIZE) {
+                memcpy(s.proj_matrix_stack[s.proj_stack_size++], s.proj_matrix, sizeof(s.proj_matrix));
+            }
+        } else if (s.model_stack_size < MATRIX_STACK_SIZE) {
+            memcpy(s.model_stack[s.model_stack_size], s.model_matrix, sizeof(s.model_matrix));
+            s.model_stack_size++;
+        }
+    }
+
+    static void pop_matrix_group(GbiState& s, bool projection, uint8_t count) {
+        for (uint8_t i = 0; i < count; i++) {
+            if (projection && s.proj_stack_size > 1) {
+                s.proj_stack_size--;
+                memcpy(s.proj_matrix, s.proj_matrix_stack[s.proj_stack_size], sizeof(s.proj_matrix));
+                s.mvp_dirty = true;
+            } else if (!projection && s.model_stack_size > 1) {
+                s.model_stack_size--;
+                memcpy(s.model_matrix, s.model_stack[s.model_stack_size - 1], sizeof(s.model_matrix));
+                s.mvp_dirty = true;
+            }
+        }
+    }
+
     static void draw_s2dex_bg_copy(GbiState& s, uint32_t address) {
         const uint32_t phys = s.from_segmented_masked(address);
         const uint8_t* bg = s.rdram + phys;
@@ -1056,11 +1088,55 @@ struct GbiState {
         s.draw_tex_rect(ulx, uly, lrx, lry, 0, 0, 0x100, 0x100, false);
     }
 
+    static void draw_s2dex_obj_rectangle(GbiState& s, uint32_t address) {
+        const uint32_t phys = s.from_segmented_masked(address);
+        const uint8_t* sp = s.rdram + phys;
+
+        const int16_t objX = static_cast<int16_t>((sp[4] << 8) | sp[5]);
+        const uint16_t scaleW = static_cast<uint16_t>((sp[6] << 8) | sp[7]);
+        const int16_t objY = static_cast<int16_t>((sp[12] << 8) | sp[13]);
+        const uint16_t scaleH = static_cast<uint16_t>((sp[14] << 8) | sp[15]);
+        const uint16_t imageW = static_cast<uint16_t>((sp[2] << 8) | sp[3]);
+        const uint16_t imageH = static_cast<uint16_t>((sp[10] << 8) | sp[11]);
+        const uint32_t image_ptr = (static_cast<uint32_t>(sp[16]) << 24)
+            | (static_cast<uint32_t>(sp[17]) << 16)
+            | (static_cast<uint32_t>(sp[18]) << 8)
+            | static_cast<uint32_t>(sp[19]);
+        const uint8_t image_fmt = sp[22];
+        const uint8_t image_siz = sp[23];
+
+        s.texture_to_load.addr = s.rdram + (image_ptr & 0x00FFFFFF);
+        s.texture_to_load.siz = image_siz;
+        s.texture_to_load.width = std::max<uint16_t>(imageW, 1);
+        s.render_tile.fmt = image_fmt;
+        s.render_tile.siz = image_siz;
+        s.render_tile.uls = 0;
+        s.render_tile.ult = 0;
+        s.render_tile.lrs = static_cast<uint16_t>((imageW - 1) * 4);
+        s.render_tile.lrt = static_cast<uint16_t>((imageH - 1) * 4);
+        s.render_tile.line_size_bytes = static_cast<uint16_t>(imageW * (1u << image_siz));
+
+        const uint32_t size_bytes = static_cast<uint32_t>(imageW) * imageH * (1u << std::min<uint32_t>(image_siz, 2u));
+        s.tmem.load_block(s.texture_to_load.addr, 0, size_bytes);
+        s.loaded_textures[0].addr = s.tmem.data();
+        s.loaded_textures[0].size_bytes = size_bytes;
+        s.loaded_textures[0].valid = true;
+
+        const int32_t ulx = static_cast<int32_t>(objX) * 4;
+        const int32_t uly = static_cast<int32_t>(objY) * 4;
+        const int32_t lrx = ulx + static_cast<int32_t>(scaleW) * 4;
+        const int32_t lry = uly + static_cast<int32_t>(scaleH) * 4;
+        s.draw_tex_rect(ulx, uly, lrx, lry, 0, 0, 0x100, 0x100, false);
+    }
+
     static void dl_s2dex(GbiState& s, DisplayList*& dl) {
         const uint8_t opcode = static_cast<uint8_t>(dl->w0 >> 24);
         switch (opcode) {
         case G_S2DEX_BG_RECT_COPY:
             draw_s2dex_bg_copy(s, dl->w1);
+            break;
+        case G_S2DEX_OBJ_RECTANGLE:
+            draw_s2dex_obj_rectangle(s, dl->w1);
             break;
         default:
             break;
@@ -1253,9 +1329,8 @@ struct GbiState {
             const int32_t lrx = static_cast<int16_t>(dl->p1(16, 16));
             const int32_t lry = static_cast<int16_t>(dl->p1(0, 16));
             dl++;
-            const int16_t uls = static_cast<int16_t>(dl->p1(16, 16));
-            const int16_t ult = static_cast<int16_t>(dl->p1(0, 16));
-            dl++;
+            const int16_t uls = static_cast<int16_t>(dl->p0(16, 16));
+            const int16_t ult = static_cast<int16_t>(dl->p0(0, 16));
             const int16_t dsdx = static_cast<int16_t>(dl->p1(16, 16));
             const int16_t dtdy = static_cast<int16_t>(dl->p1(0, 16));
             s.draw_tex_rect(ulx, uly, lrx, lry, uls, ult, dsdx, dtdy, false, left_origin, right_origin);
@@ -1266,12 +1341,13 @@ struct GbiState {
             s.set_viewport(dl->w1);
             break;
         case G_EX_SETSCISSOR_V1: {
+            const uint8_t mode = static_cast<uint8_t>(dl->p1(0, 2));
             dl++;
             const int32_t ulx = static_cast<int16_t>(dl->p0(16, 16));
             const int32_t uly = static_cast<int16_t>(dl->p0(0, 16));
             const int32_t lrx = static_cast<int16_t>(dl->p1(16, 16));
             const int32_t lry = static_cast<int16_t>(dl->p1(0, 16));
-            s.set_scissor(1, ulx, uly, lrx, lry);
+            s.set_scissor(mode, ulx, uly, lrx, lry);
             break;
         }
         case G_EX_SETRECTALIGN_V1:
@@ -1289,23 +1365,39 @@ struct GbiState {
             s.viewport_align.x_offset = static_cast<int16_t>(dl->p1(16, 16));
             s.viewport_align.y_offset = static_cast<int16_t>(dl->p1(0, 16));
             break;
-        case G_EX_SETSCISSORALIGN_V1: {
+        case G_EX_SETSCISSORALIGN_V1:
+            s.scissor_align.left_origin = static_cast<int16_t>(dl->p1(0, 12));
+            s.scissor_align.right_origin = static_cast<int16_t>(dl->p1(12, 12));
             dl++;
-            s.scissor_align.left_origin = static_cast<int16_t>(dl->p0(0, 12));
-            s.scissor_align.right_origin = static_cast<int16_t>(dl->p0(12, 12));
-            s.scissor_align.ulx_offset = static_cast<int16_t>(dl->p1(16, 16));
-            s.scissor_align.uly_offset = static_cast<int16_t>(dl->p1(0, 16));
-            dl++;
+            s.scissor_align.ulx_offset = static_cast<int16_t>(dl->p0(16, 16));
+            s.scissor_align.uly_offset = static_cast<int16_t>(dl->p0(0, 16));
             s.scissor_align.lrx_offset = static_cast<int16_t>(dl->p1(16, 16));
             s.scissor_align.lry_offset = static_cast<int16_t>(dl->p1(0, 16));
             dl++;
-            s.scissor_align.ulx_bound = static_cast<int16_t>(dl->p1(16, 16));
-            s.scissor_align.uly_bound = static_cast<int16_t>(dl->p1(0, 16));
-            dl++;
+            s.scissor_align.ulx_bound = static_cast<int16_t>(dl->p0(16, 16));
+            s.scissor_align.uly_bound = static_cast<int16_t>(dl->p0(0, 16));
             s.scissor_align.lrx_bound = static_cast<int16_t>(dl->p1(16, 16));
             s.scissor_align.lry_bound = static_cast<int16_t>(dl->p1(0, 16));
             break;
+        case G_EX_MATRIXGROUP_V1: {
+            dl++;
+            const uint32_t flags = dl->w0;
+            const bool push = (flags & 0x1u) != 0;
+            const bool projection = (flags & 0x2u) != 0;
+            if (push) {
+                push_matrix_group(s, projection);
+            }
+            break;
         }
+        case G_EX_POPMATRIXGROUP_V1: {
+            const uint8_t count = static_cast<uint8_t>(dl->p1(0, 8));
+            const bool projection = dl->p1(8, 1) != 0;
+            pop_matrix_group(s, projection, std::max<uint8_t>(count, 1));
+            break;
+        }
+        case G_EX_SETREFRESHRATE_V1:
+        case G_EX_SETRDRAMEXTENDED_V1:
+            break;
         case G_EX_FORCEBRANCH_V1:
             s.force_branch = dl->p1(0, 1) != 0;
             break;
