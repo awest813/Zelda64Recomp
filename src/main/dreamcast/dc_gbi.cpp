@@ -6,8 +6,11 @@
 #ifdef DREAMCAST
 
 #include "dc_gbi.h"
+#include "dc_combiner.h"
+#include "dc_math.h"
 #include "dc_pvr_renderer.h"
 #include "dc_texture_cache.h"
+#include "dc_tmem.h"
 
 #include <algorithm>
 #include <array>
@@ -129,17 +132,47 @@ constexpr uint8_t G_EX_SETVIEWPORT_V1 = 0x04;
 constexpr uint8_t G_EX_SETSCISSOR_V1 = 0x05;
 constexpr uint8_t G_EX_SETRECTALIGN_V1 = 0x06;
 constexpr uint8_t G_EX_SETSCISSORALIGN_V1 = 0x08;
+constexpr uint8_t G_EX_TEXRECT_V1 = 0x02;
+constexpr uint8_t G_EX_SETVIEWPORTALIGN_V1 = 0x07;
+constexpr uint8_t G_EX_PUSHOTHERMODE_V1 = 0x19;
+constexpr uint8_t G_EX_POPOTHERMODE_V1 = 0x1A;
+constexpr uint8_t G_EX_PUSHCOMBINE_V1 = 0x1B;
+constexpr uint8_t G_EX_POPCOMBINE_V1 = 0x1C;
+constexpr uint8_t G_EX_PUSHPROJMATRIX_V1 = 0x1D;
+constexpr uint8_t G_EX_POPPROJMATRIX_V1 = 0x1E;
+constexpr uint8_t G_EX_PUSHGEOMETRYMODE_V1 = 0x29;
+constexpr uint8_t G_EX_POPGEOMETRYMODE_V1 = 0x2A;
+constexpr uint8_t G_EX_PUSHPRIMCOLOR_V1 = 0x27;
+constexpr uint8_t G_EX_POPPRIMCOLOR_V1 = 0x28;
+constexpr uint8_t G_EX_PUSHENVCOLOR_V1 = 0x1F;
+constexpr uint8_t G_EX_POPENVCOLOR_V1 = 0x20;
 constexpr uint8_t G_EX_FORCEBRANCH_V1 = 0x11;
 constexpr uint8_t G_EX_VERTEX_V1 = 0x14;
 constexpr uint8_t G_EX_PUSHVIEWPORT_V1 = 0x15;
 constexpr uint8_t G_EX_POPVIEWPORT_V1 = 0x16;
 constexpr uint8_t G_EX_PUSHSCISSOR_V1 = 0x17;
 constexpr uint8_t G_EX_POPSCISSOR_V1 = 0x18;
+constexpr uint8_t G_EX_MATRIXGROUP_V1 = 0x0C;
+constexpr uint8_t G_EX_POPMATRIXGROUP_V1 = 0x0D;
+constexpr uint8_t G_EX_SETREFRESHRATE_V1 = 0x09;
+constexpr uint8_t G_EX_SETRDRAMEXTENDED_V1 = 0x2C;
+
+constexpr uint8_t G_S2DEX_OBJ_RECTANGLE = 0x0C;
 
 constexpr size_t MAX_VERTICES = 256;
 constexpr size_t MAX_SEGMENTS = 16;
 constexpr size_t MATRIX_STACK_SIZE = 32;
+constexpr size_t VIEWPORT_STACK_SIZE = 16;
+constexpr size_t STATE_STACK_SIZE = 16;
 constexpr float DEPTH_RANGE = 1024.0f;
+constexpr float REF_WIDTH = 320.0f;
+
+constexpr uint32_t G_EX_ORIGIN_NONE = 0x800;
+constexpr uint32_t G_EX_ORIGIN_LEFT = 0x0;
+constexpr uint32_t G_EX_ORIGIN_CENTER = 0x200;
+constexpr uint32_t G_EX_ORIGIN_RIGHT = 0x400;
+
+constexpr uint8_t G_S2DEX_BG_RECT_COPY = 0x0A;
 
 struct DisplayList {
     uint32_t w0;
@@ -223,38 +256,36 @@ struct ScissorRect {
 };
 
 struct RectAlign {
+    int32_t left_origin = G_EX_ORIGIN_NONE;
+    int32_t right_origin = G_EX_ORIGIN_NONE;
     int32_t left_offset = 0;
     int32_t top_offset = 0;
     int32_t right_offset = 0;
     int32_t bottom_offset = 0;
 };
 
-// ── Matrix math (4x4) ───────────────────────────────────────────────
+struct ViewportAlign {
+    int32_t origin = G_EX_ORIGIN_NONE;
+    int32_t x_offset = 0;
+    int32_t y_offset = 0;
+};
 
-static void mat4_identity(float m[4][4]) {
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            m[i][j] = (i == j) ? 1.0f : 0.0f;
-        }
-    }
-}
+struct ScissorAlign {
+    int32_t left_origin = G_EX_ORIGIN_NONE;
+    int32_t right_origin = G_EX_ORIGIN_NONE;
+    int32_t ulx_offset = 0;
+    int32_t uly_offset = 0;
+    int32_t lrx_offset = 0;
+    int32_t lry_offset = 0;
+    int32_t ulx_bound = 0;
+    int32_t uly_bound = 0;
+    int32_t lrx_bound = 2048;
+    int32_t lry_bound = 2048;
+};
 
-static void mat4_mul(const float a[4][4], const float b[4][4], float out[4][4]) {
-    float temp[4][4];
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            temp[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j];
-        }
-    }
-    memcpy(out, temp, sizeof(temp));
-}
-
-static void mat4_transform(const float m[4][4], float x, float y, float z, float& ox, float& oy, float& oz, float& ow) {
-    ox = m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3];
-    oy = m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3];
-    oz = m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3];
-    ow = m[3][0] * x + m[3][1] * y + m[3][2] * z + m[3][3];
-}
+using dreamcast::math::mat4_identity;
+using dreamcast::math::mat4_mul;
+using dreamcast::math::mat4_transform;
 
 // ── Interpreter state ───────────────────────────────────────────────
 
@@ -297,9 +328,29 @@ struct GbiState {
     bool mvp_dirty = true;
 
     Viewport viewport{};
+    std::array<Viewport, VIEWPORT_STACK_SIZE> viewport_stack{};
+    int viewport_stack_size = 1;
     std::array<ScissorRect, 16> scissor_stack{};
     int scissor_stack_size = 1;
     RectAlign rect_align{};
+    ViewportAlign viewport_align{};
+    ScissorAlign scissor_align{};
+
+    std::array<uint32_t, STATE_STACK_SIZE> geometry_mode_stack{};
+    std::array<uint64_t, STATE_STACK_SIZE> combine_stack{};
+    std::array<uint32_t, STATE_STACK_SIZE> other_mode_h_stack{};
+    std::array<uint32_t, STATE_STACK_SIZE> other_mode_l_stack{};
+    std::array<uint32_t, STATE_STACK_SIZE> prim_color_stack{};
+    std::array<uint32_t, STATE_STACK_SIZE> env_color_stack{};
+    int geometry_mode_stack_size = 0;
+    int combine_stack_size = 0;
+    int other_mode_h_stack_size = 0;
+    int other_mode_l_stack_size = 0;
+    int prim_color_stack_size = 0;
+    int env_color_stack_size = 0;
+
+    float proj_matrix_stack[MATRIX_STACK_SIZE][4][4]{};
+    int proj_stack_size = 1;
 
     uint32_t geometry_mode = G_CULL_BACK;
     uint32_t other_mode_h = 0x080CFF;
@@ -319,7 +370,12 @@ struct GbiState {
     uint32_t prim_color = 0xFFFFFFFF;
     uint32_t fill_color = 0;
     uint32_t env_color = 0xFFFFFFFF;
+    uint32_t blend_color = 0;
+    uint32_t fog_color = 0;
     uint64_t combine_mode = 0;
+
+    tmem::Buffer tmem{};
+    uint32_t tmem_offset = 0;
 
     TextureImage texture_to_load{};
     TileDescriptor render_tile{};
@@ -332,9 +388,69 @@ struct GbiState {
     bool texture_on = false;
     bool texture_changed = true;
     bool force_branch = true;
+    bool s2dex_active = false;
     uint8_t extended_opcode = 0;
 
     std::vector<DisplayList*> dl_stack;
+
+    float fb_width() const {
+        return static_cast<float>(std::max<uint16_t>(color_image.width, 320));
+    }
+
+    float origin_offset_x(int32_t origin, int32_t offset) const {
+        switch (origin & 0xF00) {
+        case G_EX_ORIGIN_LEFT:
+            return static_cast<float>(offset) / 4.0f;
+        case G_EX_ORIGIN_CENTER:
+            return (fb_width() - REF_WIDTH) * 0.5f + static_cast<float>(offset) / 4.0f;
+        case G_EX_ORIGIN_RIGHT:
+            return fb_width() - REF_WIDTH + static_cast<float>(offset) / 4.0f;
+        default:
+            return static_cast<float>(offset) / 4.0f;
+        }
+    }
+
+    float origin_offset_y(int32_t origin, int32_t offset) const {
+        (void)origin;
+        return static_cast<float>(offset) / 4.0f;
+    }
+
+    int32_t apply_rect_origin_x(int32_t origin, int32_t value, int32_t offset) const {
+        if ((origin & 0xF00) == G_EX_ORIGIN_NONE) {
+            return value;
+        }
+        return static_cast<int32_t>(origin_offset_x(origin, offset) * 4.0f) + value;
+    }
+
+    Viewport effective_viewport() const {
+        Viewport vp = viewport;
+        if ((viewport_align.origin & 0xF00) != G_EX_ORIGIN_NONE) {
+            vp.translate[0] += origin_offset_x(viewport_align.origin, viewport_align.x_offset);
+            vp.translate[1] += origin_offset_y(viewport_align.origin, viewport_align.y_offset);
+        }
+        return vp;
+    }
+
+    ScissorRect effective_scissor() const {
+        ScissorRect sc = scissor_stack[scissor_stack_size - 1];
+        if ((scissor_align.left_origin & 0xF00) != G_EX_ORIGIN_NONE
+            || (scissor_align.right_origin & 0xF00) != G_EX_ORIGIN_NONE) {
+            // Offsets and bounds arrive in 1/4-pixel units from the extended DL macros.
+            const int32_t left_anchor = static_cast<int32_t>(origin_offset_x(scissor_align.left_origin, 0) * 4.0f);
+            const int32_t right_anchor = static_cast<int32_t>((origin_offset_x(scissor_align.right_origin, 0) + fb_width() - REF_WIDTH) * 4.0f);
+            sc.ulx = left_anchor + scissor_align.ulx_bound + scissor_align.ulx_offset;
+            sc.uly = scissor_align.uly_bound + scissor_align.uly_offset;
+            sc.lrx = right_anchor + scissor_align.lrx_bound + scissor_align.lrx_offset;
+            sc.lry = scissor_align.lry_bound + scissor_align.lry_offset;
+            sc.enabled = true;
+        }
+        return sc;
+    }
+
+    bool passes_scissor(float screen_x, float screen_y) const {
+        const ScissorRect sc = effective_scissor();
+        return sc.contains_pixel(static_cast<int>(screen_x), static_cast<int>(screen_y));
+    }
 
     uint32_t from_segmented(uint32_t seg_addr) const {
         return segments[(seg_addr >> 24) & 0x0F] + (seg_addr & 0x00FFFFFF);
@@ -367,9 +483,10 @@ struct GbiState {
 
         TransformedVertex& out = xf_buffer[index];
         out.w = tw;
+        const Viewport vp = effective_viewport();
         const float inv_w = 1.0f / tw;
-        out.screen_x = (tx * inv_w) * viewport.scale[0] + viewport.translate[0];
-        out.screen_y = (ty * -inv_w) * viewport.scale[1] + viewport.translate[1];
+        out.screen_x = (tx * inv_w) * vp.scale[0] + vp.translate[0];
+        out.screen_y = (ty * -inv_w) * vp.scale[1] + vp.translate[1];
         const float ndc_z = tz * inv_w;
         out.depth = std::clamp((ndc_z + 1.0f) * 0.5f, 0.0f, 1.0f);
         out.tex_u = static_cast<float>((static_cast<int32_t>(v.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
@@ -393,48 +510,18 @@ struct GbiState {
     }
 
     bool combine_uses_texel0() const {
-        const uint32_t alpha = static_cast<uint32_t>(combine_mode & 0xFFFFFFFFu);
-        const uint32_t rgb = static_cast<uint32_t>((combine_mode >> 32) & 0xFFFFFFFFu);
-        auto uses_tex = [](uint32_t word) {
-            for (int i = 0; i < 4; i++) {
-                const uint32_t mux = (word >> (i * 3)) & 7u;
-                if (mux == G_CCMUX_TEXEL0 || mux == G_CCMUX_TEXEL1) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        return uses_tex(rgb) || uses_tex(alpha);
+        return combiner::uses_texel0(combine_mode);
     }
 
     uint32_t vertex_combine_factor(uint8_t vr, uint8_t vg, uint8_t vb, uint8_t va) const {
-        // Approximate (A-B)*C+D for common MODULATE/DECAL paths using shade/prim/env.
-        uint8_t pr, pg, pb, pa, er, eg, eb, ea;
-        unpack_color(prim_color, pr, pg, pb, pa);
-        unpack_color(env_color, er, eg, eb, ea);
-
-        uint8_t r = vr;
-        uint8_t g = vg;
-        uint8_t b = vb;
-        uint8_t a = va;
-
-        const uint32_t rgb = static_cast<uint32_t>((combine_mode >> 32) & 0xFFFFFFFFu);
-        const uint32_t d_mux = (rgb >> 9) & 7u;
-        const uint32_t c_mux = (rgb >> 6) & 7u;
-
-        if (c_mux == G_CCMUX_PRIMITIVE || d_mux == G_CCMUX_PRIMITIVE) {
-            r = mul_u8(r, pr);
-            g = mul_u8(g, pg);
-            b = mul_u8(b, pb);
-            a = mul_u8(a, pa);
-        }
-        if (c_mux == G_CCMUX_ENVIRONMENT || d_mux == G_CCMUX_ENVIRONMENT) {
-            r = mul_u8(r, er);
-            g = mul_u8(g, eg);
-            b = mul_u8(b, eb);
-            a = mul_u8(a, ea);
-        }
-        return pack_argb(r, g, b, a);
+        combiner::Inputs inputs{};
+        inputs.shade = {vr, vg, vb, va};
+        unpack_color(prim_color, inputs.prim.r, inputs.prim.g, inputs.prim.b, inputs.prim.a);
+        unpack_color(env_color, inputs.env.r, inputs.env.g, inputs.env.b, inputs.env.a);
+        inputs.texel0 = {255, 255, 255, 255};
+        inputs.texel1 = {255, 255, 255, 255};
+        const bool two_cycle = (other_mode_h & (1u << G_MDSFT_CYCLETYPE)) != 0;
+        return combiner::evaluate(combine_mode, inputs, two_cycle);
     }
 
     tex::Surface resolve_texture() {
@@ -473,10 +560,11 @@ struct GbiState {
              | static_cast<uint32_t>(b);
     }
 
-    void fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
-        ulx += rect_align.left_offset;
+    void fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry,
+                   int32_t left_origin = G_EX_ORIGIN_NONE, int32_t right_origin = G_EX_ORIGIN_NONE) {
+        ulx = apply_rect_origin_x(left_origin, ulx, rect_align.left_offset);
         uly += rect_align.top_offset;
-        lrx += rect_align.right_offset;
+        lrx = apply_rect_origin_x(right_origin, lrx, rect_align.right_offset);
         lry += rect_align.bottom_offset;
 
         if (lrx < ulx || lry < uly) {
@@ -528,6 +616,16 @@ struct GbiState {
         }
         if ((geometry_mode & G_CULL_BACK) && !front_face) {
             return;
+        }
+
+        const ScissorRect scissor = effective_scissor();
+        if (scissor.enabled) {
+            const bool any_inside = passes_scissor(v0.screen_x, v0.screen_y)
+                || passes_scissor(v1.screen_x, v1.screen_y)
+                || passes_scissor(v2.screen_x, v2.screen_y);
+            if (!any_inside) {
+                return;
+            }
         }
 
         if (renderer == nullptr) {
@@ -582,14 +680,15 @@ struct GbiState {
         }
     }
 
-    void draw_tex_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
+    void draw_tex_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip,
+                       int32_t left_origin = G_EX_ORIGIN_NONE, int32_t right_origin = G_EX_ORIGIN_NONE) {
         if (renderer == nullptr) {
             return;
         }
 
-        ulx += rect_align.left_offset;
+        ulx = apply_rect_origin_x(left_origin, ulx, rect_align.left_offset);
         uly += rect_align.top_offset;
-        lrx += rect_align.right_offset;
+        lrx = apply_rect_origin_x(right_origin, lrx, rect_align.right_offset);
         lry += rect_align.bottom_offset;
 
         if (flip) {
@@ -636,6 +735,9 @@ struct GbiState {
         viewport.translate[0] = static_cast<float>(vp->vtrans[1]) / 4.0f;
         viewport.translate[1] = static_cast<float>(vp->vtrans[0]) / 4.0f;
         viewport.translate[2] = static_cast<float>(vp->vtrans[3]) / DEPTH_RANGE;
+        if (viewport_stack_size > 0) {
+            viewport_stack[viewport_stack_size - 1] = viewport;
+        }
     }
 
     void matrix_op(uint32_t address, uint8_t params) {
@@ -872,6 +974,175 @@ struct GbiState {
         s.env_color = dl->w1;
     }
 
+    static void dl_setblendcolor(GbiState& s, DisplayList*& dl) {
+        s.blend_color = dl->w1;
+    }
+
+    static void dl_setfogcolor(GbiState& s, DisplayList*& dl) {
+        s.fog_color = dl->w1;
+    }
+
+    static void dl_load_ucode(GbiState& s, DisplayList*& dl) {
+        const DisplayList* next = dl + 1;
+        if ((next->w0 >> 24) == 0 && next->w1 != 0) {
+            s.s2dex_active = false;
+            dl++;
+        } else {
+            s.s2dex_active = true;
+        }
+    }
+
+    static void push_state(uint32_t* stack, int& size, uint32_t value) {
+        if (size < STATE_STACK_SIZE) {
+            stack[size++] = value;
+        }
+    }
+
+    static bool pop_state(uint32_t* stack, int& size, uint32_t& value) {
+        if (size <= 0) {
+            return false;
+        }
+        value = stack[--size];
+        return true;
+    }
+
+    static void push_u64(uint64_t* stack, int& size, uint64_t value) {
+        if (size < STATE_STACK_SIZE) {
+            stack[size++] = value;
+        }
+    }
+
+    static bool pop_u64(uint64_t* stack, int& size, uint64_t& value) {
+        if (size <= 0) {
+            return false;
+        }
+        value = stack[--size];
+        return true;
+    }
+
+    static void push_matrix_group(GbiState& s, bool projection) {
+        if (projection) {
+            if (s.proj_stack_size < MATRIX_STACK_SIZE) {
+                memcpy(s.proj_matrix_stack[s.proj_stack_size++], s.proj_matrix, sizeof(s.proj_matrix));
+            }
+        } else if (s.model_stack_size < MATRIX_STACK_SIZE) {
+            memcpy(s.model_stack[s.model_stack_size], s.model_matrix, sizeof(s.model_matrix));
+            s.model_stack_size++;
+        }
+    }
+
+    static void pop_matrix_group(GbiState& s, bool projection, uint8_t count) {
+        for (uint8_t i = 0; i < count; i++) {
+            if (projection && s.proj_stack_size > 1) {
+                s.proj_stack_size--;
+                memcpy(s.proj_matrix, s.proj_matrix_stack[s.proj_stack_size], sizeof(s.proj_matrix));
+                s.mvp_dirty = true;
+            } else if (!projection && s.model_stack_size > 1) {
+                s.model_stack_size--;
+                memcpy(s.model_matrix, s.model_stack[s.model_stack_size - 1], sizeof(s.model_matrix));
+                s.mvp_dirty = true;
+            }
+        }
+    }
+
+    static void draw_s2dex_bg_copy(GbiState& s, uint32_t address) {
+        const uint32_t phys = s.from_segmented_masked(address);
+        const uint8_t* bg = s.rdram + phys;
+
+        const uint16_t image_w = static_cast<uint16_t>((bg[2] << 8) | bg[3]);
+        const int16_t frame_x = static_cast<int16_t>((bg[4] << 8) | bg[5]);
+        const uint16_t frame_w = static_cast<uint16_t>((bg[6] << 8) | bg[7]);
+        const uint16_t image_h = static_cast<uint16_t>((bg[10] << 8) | bg[11]);
+        const int16_t frame_y = static_cast<int16_t>((bg[12] << 8) | bg[13]);
+        const uint16_t frame_h = static_cast<uint16_t>((bg[14] << 8) | bg[15]);
+        const uint32_t image_ptr = (static_cast<uint32_t>(bg[16]) << 24)
+            | (static_cast<uint32_t>(bg[17]) << 16)
+            | (static_cast<uint32_t>(bg[18]) << 8)
+            | static_cast<uint32_t>(bg[19]);
+        const uint8_t image_fmt = bg[22];
+        const uint8_t image_siz = bg[23];
+
+        s.texture_to_load.addr = s.rdram + (image_ptr & 0x00FFFFFF);
+        s.texture_to_load.siz = image_siz;
+        s.texture_to_load.width = std::max<uint16_t>(image_w, 1);
+
+        s.render_tile.fmt = image_fmt;
+        s.render_tile.siz = image_siz;
+        s.render_tile.uls = 0;
+        s.render_tile.ult = 0;
+        s.render_tile.lrs = static_cast<uint16_t>((image_w - 1) * 4);
+        s.render_tile.lrt = static_cast<uint16_t>((image_h - 1) * 4);
+        s.render_tile.line_size_bytes = static_cast<uint16_t>(image_w * (1u << image_siz));
+
+        const uint32_t size_bytes = static_cast<uint32_t>(image_w) * image_h * (1u << std::min<uint32_t>(image_siz, 2u));
+        s.tmem.load_block(s.texture_to_load.addr, 0, size_bytes);
+        s.loaded_textures[0].addr = s.tmem.data();
+        s.loaded_textures[0].size_bytes = size_bytes;
+        s.loaded_textures[0].valid = true;
+        s.texture_changed = true;
+
+        const int32_t ulx = static_cast<int32_t>(frame_x) * 4;
+        const int32_t uly = static_cast<int32_t>(frame_y) * 4;
+        const int32_t lrx = ulx + static_cast<int32_t>(frame_w) * 4;
+        const int32_t lry = uly + static_cast<int32_t>(frame_h) * 4;
+        s.draw_tex_rect(ulx, uly, lrx, lry, 0, 0, 0x100, 0x100, false);
+    }
+
+    static void draw_s2dex_obj_rectangle(GbiState& s, uint32_t address) {
+        const uint32_t phys = s.from_segmented_masked(address);
+        const uint8_t* sp = s.rdram + phys;
+
+        const int16_t objX = static_cast<int16_t>((sp[4] << 8) | sp[5]);
+        const uint16_t scaleW = static_cast<uint16_t>((sp[6] << 8) | sp[7]);
+        const int16_t objY = static_cast<int16_t>((sp[12] << 8) | sp[13]);
+        const uint16_t scaleH = static_cast<uint16_t>((sp[14] << 8) | sp[15]);
+        const uint16_t imageW = static_cast<uint16_t>((sp[2] << 8) | sp[3]);
+        const uint16_t imageH = static_cast<uint16_t>((sp[10] << 8) | sp[11]);
+        const uint32_t image_ptr = (static_cast<uint32_t>(sp[16]) << 24)
+            | (static_cast<uint32_t>(sp[17]) << 16)
+            | (static_cast<uint32_t>(sp[18]) << 8)
+            | static_cast<uint32_t>(sp[19]);
+        const uint8_t image_fmt = sp[22];
+        const uint8_t image_siz = sp[23];
+
+        s.texture_to_load.addr = s.rdram + (image_ptr & 0x00FFFFFF);
+        s.texture_to_load.siz = image_siz;
+        s.texture_to_load.width = std::max<uint16_t>(imageW, 1);
+        s.render_tile.fmt = image_fmt;
+        s.render_tile.siz = image_siz;
+        s.render_tile.uls = 0;
+        s.render_tile.ult = 0;
+        s.render_tile.lrs = static_cast<uint16_t>((imageW - 1) * 4);
+        s.render_tile.lrt = static_cast<uint16_t>((imageH - 1) * 4);
+        s.render_tile.line_size_bytes = static_cast<uint16_t>(imageW * (1u << image_siz));
+
+        const uint32_t size_bytes = static_cast<uint32_t>(imageW) * imageH * (1u << std::min<uint32_t>(image_siz, 2u));
+        s.tmem.load_block(s.texture_to_load.addr, 0, size_bytes);
+        s.loaded_textures[0].addr = s.tmem.data();
+        s.loaded_textures[0].size_bytes = size_bytes;
+        s.loaded_textures[0].valid = true;
+
+        const int32_t ulx = static_cast<int32_t>(objX) * 4;
+        const int32_t uly = static_cast<int32_t>(objY) * 4;
+        const int32_t lrx = ulx + static_cast<int32_t>(scaleW) * 4;
+        const int32_t lry = uly + static_cast<int32_t>(scaleH) * 4;
+        s.draw_tex_rect(ulx, uly, lrx, lry, 0, 0, 0x100, 0x100, false);
+    }
+
+    static void dl_s2dex(GbiState& s, DisplayList*& dl) {
+        const uint8_t opcode = static_cast<uint8_t>(dl->w0 >> 24);
+        switch (opcode) {
+        case G_S2DEX_BG_RECT_COPY:
+            draw_s2dex_bg_copy(s, dl->w1);
+            break;
+        case G_S2DEX_OBJ_RECTANGLE:
+            draw_s2dex_obj_rectangle(s, dl->w1);
+            break;
+        default:
+            break;
+        }
+    }
+
     static void dl_setcombine(GbiState& s, DisplayList*& dl) {
         s.combine_mode = (static_cast<uint64_t>(dl->w1) << 32) | dl->w0;
     }
@@ -934,7 +1205,8 @@ struct GbiState {
 
         const uint32_t size_bytes = (static_cast<uint32_t>(lrs) + 1u) << word_size_shift;
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
-        s.loaded_textures[slot].addr = s.texture_to_load.addr;
+        s.tmem.load_block(s.texture_to_load.addr, s.tmem_offset, size_bytes);
+        s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
         s.loaded_textures[0] = s.loaded_textures[slot];
@@ -968,11 +1240,15 @@ struct GbiState {
             break;
         }
 
-        const uint32_t size_bytes = (((static_cast<uint32_t>(lrs) >> G_TEXTURE_IMAGE_FRAC) + 1u)
-            * ((static_cast<uint32_t>(lrt) >> G_TEXTURE_IMAGE_FRAC) + 1u)) << word_size_shift;
+        const uint32_t width_tiles = (static_cast<uint32_t>(lrs) >> G_TEXTURE_IMAGE_FRAC) + 1u;
+        const uint32_t height_tiles = (static_cast<uint32_t>(lrt) >> G_TEXTURE_IMAGE_FRAC) + 1u;
+        const uint32_t width_bytes = width_tiles << word_size_shift;
+        const uint32_t size_bytes = width_bytes * height_tiles;
 
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
-        s.loaded_textures[slot].addr = s.texture_to_load.addr;
+        const uint32_t src_stride = std::max<uint32_t>(s.texture_to_load.width, 1u) << word_size_shift;
+        s.tmem.load_tile(s.texture_to_load.addr, src_stride, s.tmem_offset, width_bytes, height_tiles);
+        s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
         s.loaded_textures[0] = s.loaded_textures[slot];
@@ -1034,12 +1310,30 @@ struct GbiState {
         case G_EX_NOOP:
             break;
         case G_EX_FILLRECT_V1: {
+            const int32_t left_origin = static_cast<int32_t>(dl->p1(0, 12));
+            const int32_t right_origin = static_cast<int32_t>(dl->p1(12, 12));
             dl++;
             const int32_t ulx = static_cast<int16_t>(dl->p0(16, 16));
             const int32_t uly = static_cast<int16_t>(dl->p0(0, 16));
             const int32_t lrx = static_cast<int16_t>(dl->p1(16, 16));
             const int32_t lry = static_cast<int16_t>(dl->p1(0, 16));
-            s.fill_rect(ulx, uly, lrx, lry);
+            s.fill_rect(ulx, uly, lrx, lry, left_origin, right_origin);
+            break;
+        }
+        case G_EX_TEXRECT_V1: {
+            const int32_t left_origin = static_cast<int32_t>(dl->p1(3, 12));
+            const int32_t right_origin = static_cast<int32_t>(dl->p1(15, 12));
+            dl++;
+            const int32_t ulx = static_cast<int16_t>(dl->p0(16, 16));
+            const int32_t uly = static_cast<int16_t>(dl->p0(0, 16));
+            const int32_t lrx = static_cast<int16_t>(dl->p1(16, 16));
+            const int32_t lry = static_cast<int16_t>(dl->p1(0, 16));
+            dl++;
+            const int16_t uls = static_cast<int16_t>(dl->p0(16, 16));
+            const int16_t ult = static_cast<int16_t>(dl->p0(0, 16));
+            const int16_t dsdx = static_cast<int16_t>(dl->p1(16, 16));
+            const int16_t dtdy = static_cast<int16_t>(dl->p1(0, 16));
+            s.draw_tex_rect(ulx, uly, lrx, lry, uls, ult, dsdx, dtdy, false, left_origin, right_origin);
             break;
         }
         case G_EX_SETVIEWPORT_V1:
@@ -1047,27 +1341,118 @@ struct GbiState {
             s.set_viewport(dl->w1);
             break;
         case G_EX_SETSCISSOR_V1: {
+            const uint8_t mode = static_cast<uint8_t>(dl->p1(0, 2));
             dl++;
             const int32_t ulx = static_cast<int16_t>(dl->p0(16, 16));
             const int32_t uly = static_cast<int16_t>(dl->p0(0, 16));
             const int32_t lrx = static_cast<int16_t>(dl->p1(16, 16));
             const int32_t lry = static_cast<int16_t>(dl->p1(0, 16));
-            s.set_scissor(1, ulx, uly, lrx, lry);
+            s.set_scissor(mode, ulx, uly, lrx, lry);
             break;
         }
         case G_EX_SETRECTALIGN_V1:
+            s.rect_align.left_origin = static_cast<int16_t>(dl->p1(0, 12));
+            s.rect_align.right_origin = static_cast<int16_t>(dl->p1(12, 12));
             dl++;
             s.rect_align.left_offset = static_cast<int16_t>(dl->p0(16, 16));
             s.rect_align.top_offset = static_cast<int16_t>(dl->p0(0, 16));
             s.rect_align.right_offset = static_cast<int16_t>(dl->p1(16, 16));
             s.rect_align.bottom_offset = static_cast<int16_t>(dl->p1(0, 16));
             break;
+        case G_EX_SETVIEWPORTALIGN_V1:
+            dl++;
+            s.viewport_align.origin = static_cast<int16_t>(dl->p0(0, 12));
+            s.viewport_align.x_offset = static_cast<int16_t>(dl->p1(16, 16));
+            s.viewport_align.y_offset = static_cast<int16_t>(dl->p1(0, 16));
+            break;
+        case G_EX_SETSCISSORALIGN_V1:
+            s.scissor_align.left_origin = static_cast<int16_t>(dl->p1(0, 12));
+            s.scissor_align.right_origin = static_cast<int16_t>(dl->p1(12, 12));
+            dl++;
+            s.scissor_align.ulx_offset = static_cast<int16_t>(dl->p0(16, 16));
+            s.scissor_align.uly_offset = static_cast<int16_t>(dl->p0(0, 16));
+            s.scissor_align.lrx_offset = static_cast<int16_t>(dl->p1(16, 16));
+            s.scissor_align.lry_offset = static_cast<int16_t>(dl->p1(0, 16));
+            dl++;
+            s.scissor_align.ulx_bound = static_cast<int16_t>(dl->p0(16, 16));
+            s.scissor_align.uly_bound = static_cast<int16_t>(dl->p0(0, 16));
+            s.scissor_align.lrx_bound = static_cast<int16_t>(dl->p1(16, 16));
+            s.scissor_align.lry_bound = static_cast<int16_t>(dl->p1(0, 16));
+            break;
+        case G_EX_MATRIXGROUP_V1: {
+            dl++;
+            const uint32_t flags = dl->w0;
+            const bool push = (flags & 0x1u) != 0;
+            const bool projection = (flags & 0x2u) != 0;
+            if (push) {
+                push_matrix_group(s, projection);
+            }
+            break;
+        }
+        case G_EX_POPMATRIXGROUP_V1: {
+            const uint8_t count = static_cast<uint8_t>(dl->p1(0, 8));
+            const bool projection = dl->p1(8, 1) != 0;
+            pop_matrix_group(s, projection, std::max<uint8_t>(count, 1));
+            break;
+        }
+        case G_EX_SETREFRESHRATE_V1:
+        case G_EX_SETRDRAMEXTENDED_V1:
+            break;
         case G_EX_FORCEBRANCH_V1:
             s.force_branch = dl->p1(0, 1) != 0;
             break;
         case G_EX_PUSHVIEWPORT_V1:
+            if (s.viewport_stack_size < static_cast<int>(VIEWPORT_STACK_SIZE)) {
+                s.viewport_stack[s.viewport_stack_size++] = s.viewport;
+            }
             break;
         case G_EX_POPVIEWPORT_V1:
+            if (s.viewport_stack_size > 1) {
+                s.viewport = s.viewport_stack[--s.viewport_stack_size];
+            }
+            break;
+        case G_EX_PUSHOTHERMODE_V1:
+            push_state(s.other_mode_h_stack.data(), s.other_mode_h_stack_size, s.other_mode_h);
+            push_state(s.other_mode_l_stack.data(), s.other_mode_l_stack_size, s.other_mode_l);
+            break;
+        case G_EX_POPOTHERMODE_V1:
+            pop_state(s.other_mode_l_stack.data(), s.other_mode_l_stack_size, s.other_mode_l);
+            pop_state(s.other_mode_h_stack.data(), s.other_mode_h_stack_size, s.other_mode_h);
+            break;
+        case G_EX_PUSHCOMBINE_V1:
+            push_u64(s.combine_stack.data(), s.combine_stack_size, s.combine_mode);
+            break;
+        case G_EX_POPCOMBINE_V1:
+            pop_u64(s.combine_stack.data(), s.combine_stack_size, s.combine_mode);
+            break;
+        case G_EX_PUSHPROJMATRIX_V1:
+            if (s.proj_stack_size < MATRIX_STACK_SIZE) {
+                memcpy(s.proj_matrix_stack[s.proj_stack_size++], s.proj_matrix, sizeof(s.proj_matrix));
+            }
+            break;
+        case G_EX_POPPROJMATRIX_V1:
+            if (s.proj_stack_size > 1) {
+                memcpy(s.proj_matrix, s.proj_matrix_stack[--s.proj_stack_size], sizeof(s.proj_matrix));
+                s.mvp_dirty = true;
+            }
+            break;
+        case G_EX_PUSHGEOMETRYMODE_V1:
+            push_state(s.geometry_mode_stack.data(), s.geometry_mode_stack_size, s.geometry_mode);
+            break;
+        case G_EX_POPGEOMETRYMODE_V1:
+            pop_state(s.geometry_mode_stack.data(), s.geometry_mode_stack_size, s.geometry_mode);
+            break;
+        case G_EX_PUSHPRIMCOLOR_V1:
+            push_state(s.prim_color_stack.data(), s.prim_color_stack_size, s.prim_color);
+            break;
+        case G_EX_POPPRIMCOLOR_V1:
+            pop_state(s.prim_color_stack.data(), s.prim_color_stack_size, s.prim_color);
+            break;
+        case G_EX_PUSHENVCOLOR_V1:
+            push_state(s.env_color_stack.data(), s.env_color_stack_size, s.env_color);
+            break;
+        case G_EX_POPENVCOLOR_V1:
+            pop_state(s.env_color_stack.data(), s.env_color_stack_size, s.env_color);
             break;
         case G_EX_PUSHSCISSOR_V1:
             if (s.scissor_stack_size < 15) {
@@ -1130,6 +1515,9 @@ struct GbiState {
         gbi_dispatch[G_SETPRIMCOLOR] = dl_setprimcolor;
         gbi_dispatch[G_SETFILLCOLOR] = dl_setfillcolor;
         gbi_dispatch[G_SETENVCOLOR] = dl_setenvcolor;
+        gbi_dispatch[G_SETBLENDCOLOR] = dl_setblendcolor;
+        gbi_dispatch[G_SETFOGCOLOR] = dl_setfogcolor;
+        gbi_dispatch[G_LOAD_UCODE] = dl_load_ucode;
         gbi_dispatch[G_FILLRECT] = dl_fillrect;
         gbi_dispatch[G_SETSCISSOR] = dl_setscissor;
         gbi_dispatch[G_TEXRECT] = dl_texrect;
@@ -1175,6 +1563,8 @@ struct GbiState {
 
             if (state.extended_opcode != 0 && opcode == state.extended_opcode) {
                 dl_extended(state, dl);
+            } else if (state.s2dex_active && opcode <= G_LINE3D) {
+                dl_s2dex(state, dl);
             } else {
                 gbi_dispatch[opcode](state, dl);
             }
@@ -1216,6 +1606,8 @@ void Interpreter::reset() {
     mat4_identity(s.model_matrix);
     mat4_identity(s.proj_matrix);
     mat4_identity(s.model_stack[0]);
+    mat4_identity(s.proj_matrix_stack[0]);
+    s.viewport_stack[0] = s.viewport;
     s.mvp_dirty = true;
     s.geometry_mode = G_CULL_BACK;
     s.other_mode_h = 0x080CFF;

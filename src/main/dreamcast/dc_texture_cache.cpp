@@ -150,13 +150,24 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
             surface.height = entries_[i].height;
             surface.stride = entries_[i].stride;
             surface.pvr_format = entries_[i].pvr_format;
+            surface.cms = tile.cms;
+            surface.cmt = tile.cmt;
             surface.valid = entries_[i].vram != 0;
             return surface;
         }
     }
 
-    const uint32_t width = std::max(texture_width(tex, tile), 1u);
-    const uint32_t height = std::max(texture_height(tex, tile), 1u);
+    uint32_t width = std::max(texture_width(tex, tile), 1u);
+    uint32_t height = std::max(texture_height(tex, tile), 1u);
+
+    // Crop to the active render tile when tile bounds are set.
+    const uint32_t tile_w = std::max<uint32_t>((tile.lrs - tile.uls + 4) / 4, 1);
+    const uint32_t tile_h = std::max<uint32_t>((tile.lrt - tile.ult + 4) / 4, 1);
+    if (tile.lrs >= tile.uls && tile.lrt >= tile.ult) {
+        width = std::min(width, tile_w);
+        height = std::min(height, tile_h);
+    }
+
     const uint32_t stride = align_up(width, 32);
 
     std::vector<uint16_t> pixels(static_cast<size_t>(stride) * height, 0);
@@ -305,6 +316,8 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
     surface.width = static_cast<uint16_t>(width);
     surface.height = static_cast<uint16_t>(height);
     surface.stride = static_cast<uint16_t>(stride);
+    surface.cms = tile.cms;
+    surface.cmt = tile.cmt;
     surface.valid = true;
     return surface;
 }

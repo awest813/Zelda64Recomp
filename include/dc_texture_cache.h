@@ -33,6 +33,8 @@ struct Surface {
     uint16_t height = 0;
     uint16_t stride = 0;
     uint32_t pvr_format = 0;
+    uint8_t cms = 0;
+    uint8_t cmt = 0;
     bool valid = false;
 };
 
