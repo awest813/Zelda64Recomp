@@ -41,29 +41,42 @@ if (WIN32)
     set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/lib/")
 endif()
 
-set(RT64_STATIC TRUE)
-set(RT64_SDL_WINDOW_VULKAN TRUE)
-add_compile_definitions(HLSL_CPU)
-
-if (RECOMP_FLATPAK)
-    add_compile_definitions(RECOMP_FLATPAK)
+# ── Dreamcast platform detection ─────────────────────────────────────
+# DREAMCAST is set by the toolchain file (cmake/Toolchains/dreamcast.cmake)
+# or can be passed manually via -DDREAMCAST=ON.
+if (DREAMCAST)
+    add_compile_definitions(DREAMCAST)
+    message(STATUS "Building for Sega Dreamcast (SH-4 / KallistiOS)")
 endif()
 
-add_subdirectory(${CMAKE_SOURCE_DIR}/lib/rt64 ${CMAKE_BINARY_DIR}/rt64)
+if (NOT DREAMCAST)
+    # RT64, RmlUi, and LunaSVG are only used on PC platforms
+    set(RT64_STATIC TRUE)
+    set(RT64_SDL_WINDOW_VULKAN TRUE)
+    add_compile_definitions(HLSL_CPU)
 
-# set(BUILD_SHARED_LIBS_SAVED "${BUILD_SHARED_LIBS}")
-set(BUILD_SHARED_LIBS OFF)
-SET(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(${CMAKE_SOURCE_DIR}/lib/lunasvg)
-# set(BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS_SAVED}")
-SET(RMLUI_SVG_PLUGIN ON CACHE BOOL "" FORCE)
-SET(RMLUI_TESTS_ENABLED OFF CACHE BOOL "" FORCE)
-add_subdirectory(${CMAKE_SOURCE_DIR}/lib/RmlUi)
-target_compile_definitions(rmlui_core PRIVATE LUNASVG_BUILD_STATIC)
+    if (RECOMP_FLATPAK)
+        add_compile_definitions(RECOMP_FLATPAK)
+    endif()
+
+    add_subdirectory(${CMAKE_SOURCE_DIR}/lib/rt64 ${CMAKE_BINARY_DIR}/rt64)
+
+    # set(BUILD_SHARED_LIBS_SAVED "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF)
+    SET(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/lib/lunasvg)
+    # set(BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS_SAVED}")
+    SET(RMLUI_SVG_PLUGIN ON CACHE BOOL "" FORCE)
+    SET(RMLUI_TESTS_ENABLED OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/lib/RmlUi)
+    target_compile_definitions(rmlui_core PRIVATE LUNASVG_BUILD_STATIC)
+endif()
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime)
 
-target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/rt64/src)
+if (NOT DREAMCAST)
+    target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/rt64/src)
+endif()
 
 # RecompiledFuncs - Library containing the primary recompiler output
 add_library(RecompiledFuncs STATIC)
@@ -148,13 +161,9 @@ add_custom_command(OUTPUT
 add_executable(Zelda64Recompiled)
 
 set (SOURCES
-    ${CMAKE_SOURCE_DIR}/src/main/main.cpp
-    ${CMAKE_SOURCE_DIR}/src/main/support.cpp
     ${CMAKE_SOURCE_DIR}/src/main/register_overlays.cpp
     ${CMAKE_SOURCE_DIR}/src/main/register_patches.cpp
-    ${CMAKE_SOURCE_DIR}/src/main/rt64_render_context.cpp
 
-    ${CMAKE_SOURCE_DIR}/src/game/input.cpp
     ${CMAKE_SOURCE_DIR}/src/game/controls.cpp
     ${CMAKE_SOURCE_DIR}/src/game/config.cpp
     ${CMAKE_SOURCE_DIR}/src/game/scene_table.cpp
@@ -165,43 +174,64 @@ set (SOURCES
     ${CMAKE_SOURCE_DIR}/src/game/recomp_data_api.cpp
     ${CMAKE_SOURCE_DIR}/src/game/rom_decompression.cpp
 
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_renderer.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_state.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_launcher.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_config.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_prompt.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_config_sub_menu.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_color_hack.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_rml_hacks.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_elements.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_mod_details_panel.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_mod_installer.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_mod_menu.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_api.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_api_events.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_api_images.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_utils.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/util/hsv.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/core/ui_context.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_button.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_clickable.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_container.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_element.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_image.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_label.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_radio.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_scroll_container.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_slider.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_span.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_style.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_text_input.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_toggle.cpp
-
     ${CMAKE_SOURCE_DIR}/rsp/aspMain.cpp
     ${CMAKE_SOURCE_DIR}/rsp/njpgdspMain.cpp
-
-    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
 )
+
+if (DREAMCAST)
+    # Dreamcast-specific sources (replace SDL, RT64, and RmlUi)
+    list(APPEND SOURCES
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_main.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_render_context.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_support.cpp
+        ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_input.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/dreamcast/dc_ui.cpp
+    )
+else()
+    # PC platform sources (SDL2, RT64, RmlUi)
+    list(APPEND SOURCES
+        ${CMAKE_SOURCE_DIR}/src/main/main.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/support.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/rt64_render_context.cpp
+
+        ${CMAKE_SOURCE_DIR}/src/game/input.cpp
+
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_renderer.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_state.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_launcher.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_config.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_prompt.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_config_sub_menu.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_color_hack.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_rml_hacks.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_elements.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_mod_details_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_mod_installer.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_mod_menu.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_api.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_api_events.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_api_images.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/ui_utils.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/util/hsv.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/core/ui_context.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_button.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_clickable.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_container.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_element.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_image.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_label.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_radio.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_scroll_container.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_slider.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_span.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_style.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_text_input.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/elements/ui_toggle.cpp
+
+        ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
+    )
+endif()
 
 if (APPLE)
     list(APPEND SOURCES ${CMAKE_SOURCE_DIR}/src/main/support_apple.mm)
@@ -211,23 +241,32 @@ target_include_directories(Zelda64Recompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime/N64Recomp/include
     ${CMAKE_SOURCE_DIR}/lib/concurrentqueue
-    ${CMAKE_SOURCE_DIR}/lib/GamepadMotionHelpers
-    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Include
-    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/hlslpp/include
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/dxc/inc
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src/rhi
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src/render
-    ${CMAKE_SOURCE_DIR}/lib/freetype-windows-binaries/include
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/nativefiledialog-extended/src/include
     ${CMAKE_SOURCE_DIR}/lib/SlotMap
-    ${CMAKE_BINARY_DIR}/shaders
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+if (NOT DREAMCAST)
+    target_include_directories(Zelda64Recompiled PRIVATE
+        ${CMAKE_SOURCE_DIR}/lib/GamepadMotionHelpers
+        ${CMAKE_SOURCE_DIR}/lib/RmlUi/Include
+        ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends
+        ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib
+        ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/hlslpp/include
+        ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/dxc/inc
+        ${CMAKE_SOURCE_DIR}/lib/rt64/src
+        ${CMAKE_SOURCE_DIR}/lib/rt64/src/rhi
+        ${CMAKE_SOURCE_DIR}/lib/rt64/src/render
+        ${CMAKE_SOURCE_DIR}/lib/freetype-windows-binaries/include
+        ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/nativefiledialog-extended/src/include
+        ${CMAKE_BINARY_DIR}/shaders
+    )
+endif()
+
+if (DREAMCAST)
+    target_compile_options(Zelda64Recompiled PRIVATE
+        -fno-strict-aliasing
+    )
+elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     target_compile_options(Zelda64Recompiled PRIVATE
         -march=nehalem
         -fno-strict-aliasing
@@ -251,7 +290,29 @@ elseif (APPLE)
     )
 endif()
 
-if (WIN32)
+if (DREAMCAST)
+    # Dreamcast: link only the core runtime libraries (no RT64, RmlUi, SDL, NFD)
+    target_link_libraries(Zelda64Recompiled PRIVATE
+        PatchesLib
+        RecompiledFuncs
+        librecomp
+        ultramodern
+    )
+
+    # Post-build: convert ELF to Dreamcast binary
+    add_custom_command(TARGET Zelda64Recompiled POST_BUILD
+        COMMENT "[DC] Converting ELF to Dreamcast binary..."
+        COMMAND ${CMAKE_OBJCOPY} -R .stack -O binary $<TARGET_FILE:Zelda64Recompiled> ${CMAKE_BINARY_DIR}/1ST_READ.BIN
+        # To create a bootable disc image, run these manually with KOS tools:
+        # scramble 1ST_READ.BIN 1ST_READ.BIN
+        # makeip ip.txt IP.BIN
+        # mkdcdisc -e 1ST_READ.BIN -o zelda64recomp.cdi -n "ZELDA64 RECOMP"
+    )
+
+    message(STATUS "[DC] Dreamcast build configured")
+    message(STATUS "[DC] After building, use 'scramble' and 'mkdcdisc' to create a bootable disc image")
+
+elseif (WIN32)
     include(FetchContent)
 
     if (DEFINED ENV{SDL2_VERSION})
@@ -339,73 +400,80 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     target_link_libraries(Zelda64Recompiled PRIVATE "-latomic -static-libstdc++" ${CMAKE_DL_LIBS} Threads::Threads)
 endif()
 
-target_link_libraries(Zelda64Recompiled PRIVATE
-    PatchesLib
-    RecompiledFuncs
-    librecomp
-    ultramodern
-    rt64
-    RmlUi::Core
-    RmlUi::Debugger
-    nfd
-    lunasvg
-)
-
-# TODO fix the rt64 CMake script so that this doesn't need to be duplicated here
-# For DXC
-set (DXC_COMMON_OPTS "-I${PROJECT_SOURCE_DIR}/src")
-set (DXC_DXIL_OPTS "-Wno-ignored-attributes")
-set (DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
-set (DXC_PS_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_0" "-D DYNAMIC_RENDER_PARAMS")
-set (DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_0" "-D DYNAMIC_RENDER_PARAMS" "-fvk-invert-y")
-set (DXC_CS_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_0")
-set (DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_0")
-set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
-
-if (${WIN32})
-    set (DXC "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc.exe")
-    add_compile_definitions(NOMINMAX)
-else()
-    if (APPLE)
-        # Apple's binary is universal, so it'll work on both x86_64 and arm64
-        set (DXC "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/arm64/dxc-macos")
-        if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-            set(SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/spirv-cross/lib/x64" "${PROJECT_SOURCE_DIR}/lib/rt64//src/contrib/spirv-cross/bin/x64/spirv-cross")
-        else()
-            set(SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/spirv-cross/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64//src/contrib/spirv-cross/bin/x64/spirv-cross")
-        endif()
-    else()
-        if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-            set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc-linux")
-        else()
-            set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/arm64/dxc-linux")
-        endif()
-    endif()
+if (NOT DREAMCAST)
+    # PC platforms link RT64, RmlUi, NFD, and LunaSVG
+    target_link_libraries(Zelda64Recompiled PRIVATE
+        PatchesLib
+        RecompiledFuncs
+        librecomp
+        ultramodern
+        rt64
+        RmlUi::Core
+        RmlUi::Debugger
+        nfd
+        lunasvg
+    )
 endif()
 
-build_vertex_shader(Zelda64Recompiled "shaders/InterfaceVS.hlsl" "shaders/InterfaceVS.hlsl")
-build_pixel_shader(Zelda64Recompiled "shaders/InterfacePS.hlsl" "shaders/InterfacePS.hlsl")
+if (NOT DREAMCAST)
+    # TODO fix the rt64 CMake script so that this doesn't need to be duplicated here
+    # For DXC
+    set (DXC_COMMON_OPTS "-I${PROJECT_SOURCE_DIR}/src")
+    set (DXC_DXIL_OPTS "-Wno-ignored-attributes")
+    set (DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
+    set (DXC_PS_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_0" "-D DYNAMIC_RENDER_PARAMS")
+    set (DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_0" "-D DYNAMIC_RENDER_PARAMS" "-fvk-invert-y")
+    set (DXC_CS_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_0")
+    set (DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_0")
+    set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
 
-# Embed all .nrm files in the "mods" directory
-file(GLOB NRM_FILES "${CMAKE_SOURCE_DIR}/mods/*.nrm")
+    if (${WIN32})
+        set (DXC "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc.exe")
+        add_compile_definitions(NOMINMAX)
+    else()
+        if (APPLE)
+            # Apple's binary is universal, so it'll work on both x86_64 and arm64
+            set (DXC "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/arm64/dxc-macos")
+            if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+                set(SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/spirv-cross/lib/x64" "${PROJECT_SOURCE_DIR}/lib/rt64//src/contrib/spirv-cross/bin/x64/spirv-cross")
+            else()
+                set(SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/spirv-cross/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64//src/contrib/spirv-cross/bin/x64/spirv-cross")
+            endif()
+        else()
+            if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+                set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc-linux")
+            else()
+                set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/arm64/dxc-linux")
+            endif()
+        endif()
+    endif()
 
-set(GENERATED_NRM_SOURCES "")
+    build_vertex_shader(Zelda64Recompiled "shaders/InterfaceVS.hlsl" "shaders/InterfaceVS.hlsl")
+    build_pixel_shader(Zelda64Recompiled "shaders/InterfacePS.hlsl" "shaders/InterfacePS.hlsl")
+endif() # NOT DREAMCAST
 
-foreach(NRM_FILE ${NRM_FILES})
-    get_filename_component(NRM_NAME ${NRM_FILE} NAME_WE)
-    set(OUT_C "${CMAKE_CURRENT_BINARY_DIR}/mods/${NRM_NAME}.c")
-    set(OUT_H "${CMAKE_CURRENT_BINARY_DIR}/mods/${NRM_NAME}.h")
+# Embed all .nrm files in the "mods" directory (PC only; mods disabled on Dreamcast)
+if (NOT DREAMCAST)
+    file(GLOB NRM_FILES "${CMAKE_SOURCE_DIR}/mods/*.nrm")
 
-    add_custom_command(
-        OUTPUT ${OUT_C} ${OUT_H}
-        COMMAND file_to_c ${NRM_FILE} ${NRM_NAME} ${OUT_C} ${OUT_H}
-        DEPENDS ${NRM_FILE}
-    )
+    set(GENERATED_NRM_SOURCES "")
 
-    list(APPEND GENERATED_NRM_SOURCES ${OUT_C})
-endforeach()
+    foreach(NRM_FILE ${NRM_FILES})
+        get_filename_component(NRM_NAME ${NRM_FILE} NAME_WE)
+        set(OUT_C "${CMAKE_CURRENT_BINARY_DIR}/mods/${NRM_NAME}.c")
+        set(OUT_H "${CMAKE_CURRENT_BINARY_DIR}/mods/${NRM_NAME}.h")
 
-target_sources(Zelda64Recompiled PRIVATE ${GENERATED_NRM_SOURCES})
+        add_custom_command(
+            OUTPUT ${OUT_C} ${OUT_H}
+            COMMAND file_to_c ${NRM_FILE} ${NRM_NAME} ${OUT_C} ${OUT_H}
+            DEPENDS ${NRM_FILE}
+        )
+
+        list(APPEND GENERATED_NRM_SOURCES ${OUT_C})
+    endforeach()
+
+    target_sources(Zelda64Recompiled PRIVATE ${GENERATED_NRM_SOURCES})
+endif()
 
 target_sources(Zelda64Recompiled PRIVATE ${SOURCES})
 
