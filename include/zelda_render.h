@@ -1,11 +1,14 @@
 #ifndef __ZELDA_RENDER_H__
 #define __ZELDA_RENDER_H__
 
+#include "ultramodern/renderer_context.hpp"
+
+#ifndef DREAMCAST
+// RT64-specific includes (PC only)
 #include <unordered_set>
 #include <filesystem>
 
 #include "common/rt64_user_configuration.h"
-#include "ultramodern/renderer_context.hpp"
 #include "librecomp/mods.hpp"
 
 namespace RT64 {
@@ -40,8 +43,6 @@ namespace zelda64 {
             void check_texture_pack_actions();
         };
 
-        std::unique_ptr<ultramodern::renderer::RendererContext> create_render_context(uint8_t *rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode);
-
         RT64::UserConfiguration::Antialiasing RT64MaxMSAA();
         bool RT64SamplePositionsSupported();
         bool RT64HighPrecisionFBEnabled();
@@ -55,6 +56,13 @@ namespace zelda64 {
         // Texture pack enable option. Must be an enum with two options.
         // The first option is treated as disabled and the second option is treated as enabled.
         bool is_texture_pack_enable_config_option(const recomp::mods::ConfigOption& option, bool show_errors);
+    }
+}
+#endif // !DREAMCAST
+
+namespace zelda64 {
+    namespace renderer {
+        std::unique_ptr<ultramodern::renderer::RendererContext> create_render_context(uint8_t *rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode);
     }
 }
 

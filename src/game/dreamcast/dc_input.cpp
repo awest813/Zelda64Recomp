@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cmath>
 #include <atomic>
+#include <span>
 
 #include <kos.h>
 #include <dc/maple.h>
@@ -31,6 +32,7 @@
 #include <dc/maple/purupuru.h>
 
 #include "recomp_input.h"
+#include "recomp_ui.h"
 #include "ultramodern/input.hpp"
 #include "dreamcast_platform.h"
 
@@ -87,8 +89,8 @@ constexpr uint16_t N64_BTN_CL      = 0x0002;
 constexpr uint16_t N64_BTN_CR      = 0x0001;
 
 // Convert DC joystick raw value (-128..127) to float (-1.0..1.0)
-float normalize_stick(int raw) {
-    constexpr float deadzone = 0.15f;
+// deadzone is a fraction in [0.0, 1.0]; values within the deadzone return 0.
+float normalize_stick(int raw, float deadzone) {
     float val = static_cast<float>(raw) / 128.0f;
     if (val > 1.0f) val = 1.0f;
     if (val < -1.0f) val = -1.0f;
@@ -97,7 +99,7 @@ float normalize_stick(int raw) {
     if (std::fabs(val) < deadzone) {
         return 0.0f;
     }
-    // Rescale outside deadzone to 0..1
+    // Rescale outside deadzone so the usable range spans 0..1
     float sign = (val > 0.0f) ? 1.0f : -1.0f;
     return sign * (std::fabs(val) - deadzone) / (1.0f - deadzone);
 }
@@ -147,8 +149,11 @@ void maple_poll() {
 
     dc_controller.connected = true;
     dc_controller.buttons = state->buttons;
-    dc_controller.joy_x = normalize_stick(state->joyx);
-    dc_controller.joy_y = normalize_stick(-state->joyy); // Invert Y for N64 convention
+
+    // Apply the user-configured deadzone (stored as an integer percentage).
+    float deadzone = recomp::dc_joystick_deadzone / 100.0f;
+    dc_controller.joy_x = normalize_stick(state->joyx, deadzone);
+    dc_controller.joy_y = normalize_stick(-state->joyy, deadzone); // Invert Y for N64 convention
     dc_controller.trigger_l = static_cast<float>(state->ltrig) / 255.0f;
     dc_controller.trigger_r = static_cast<float>(state->rtrig) / 255.0f;
 
@@ -163,12 +168,16 @@ void maple_poll() {
         maple_device_t* purupuru = maple_enum_type(0, MAPLE_FUNC_PURUPURU);
         if (purupuru != nullptr) {
             if (should_rumble) {
-                // Puru-puru raw command: 0x00110111
-                // Bits [31:24] = 0x00: special effects (none)
-                // Bits [23:16] = 0x11: duration (continuous)
-                // Bits [15:8]  = 0x01: effect intensity (low)
-                // Bits [7:0]   = 0x11: frequency + decay
-                purupuru_rumble_raw(purupuru, 0x00110111);
+                // Map dc_rumble_strength (0–100) to puru-puru intensity (0x01–0x0F).
+                // Puru-puru raw command layout: 0x00 DD II EE
+                //   DD = duration (0x11 = continuous)
+                //   II = intensity (motor power, 0x01 = minimum, 0x0F = maximum)
+                //   EE = frequency/decay (0x11 = standard)
+                uint8_t intensity = static_cast<uint8_t>(
+                    1 + (recomp::dc_rumble_strength * 14 + 50) / 100);
+                uint32_t cmd = (0x00u << 24) | (0x11u << 16) |
+                               (static_cast<uint32_t>(intensity) << 8) | 0x11u;
+                purupuru_rumble_raw(purupuru, cmd);
             } else {
                 // Stop rumble: all zeros
                 purupuru_rumble_raw(purupuru, 0x00000000);
@@ -250,6 +259,148 @@ ultramodern::input::connected_device_info_t get_connected_device_info(int contro
     return info;
 }
 
+// ── Analog / digital input queries ──────────────────────────────────
+// The Dreamcast has no keyboard or generic binding system; these functions
+// return zero / false for all binding queries. Actual input is returned by
+// get_n64_input() above, which reads directly from the Maple bus.
+
+float get_input_analog(const InputField& /*field*/) {
+    return 0.0f;
+}
+
+float get_input_analog(const std::span<const InputField> /*fields*/) {
+    return 0.0f;
+}
+
+bool get_input_digital(const InputField& /*field*/) {
+    return false;
+}
+
+bool get_input_digital(const std::span<const InputField> /*fields*/) {
+    return false;
+}
+
+// Gyro, mouse, and right-stick are not present on the standard Dreamcast
+// controller. Return zero deltas/values.
+void get_gyro_deltas(float* x, float* y) {
+    *x = 0.0f;
+    *y = 0.0f;
+}
+
+void get_mouse_deltas(float* x, float* y) {
+    *x = 0.0f;
+    *y = 0.0f;
+}
+
+void get_right_analog(float* x, float* y) {
+    // The Dreamcast controller has only one analog stick.
+    *x = 0.0f;
+    *y = 0.0f;
+}
+
+// ── Rumble strength ─────────────────────────────────────────────────
+// Puru-puru rumble is either on or off; expose as 0–100 scale.
+static int dc_rumble_strength = 100;
+
+int get_rumble_strength() {
+    return dc_rumble_strength;
+}
+
+void set_rumble_strength(int strength) {
+    dc_rumble_strength = strength;
+}
+
+// ── Sensitivity / deadzone stubs (no keyboard/mouse on Dreamcast) ───
+static int dc_gyro_sensitivity    = 50;
+static int dc_mouse_sensitivity   = 50;
+static int dc_joystick_deadzone   = 15; // percent
+
+int  get_gyro_sensitivity()   { return dc_gyro_sensitivity; }
+void set_gyro_sensitivity(int v) { dc_gyro_sensitivity = v; }
+int  get_mouse_sensitivity()  { return dc_mouse_sensitivity; }
+void set_mouse_sensitivity(int v) { dc_mouse_sensitivity = v; }
+int  get_joystick_deadzone()  { return dc_joystick_deadzone; }
+void set_joystick_deadzone(int v) { dc_joystick_deadzone = v; }
+
+void apply_joystick_deadzone(float x_in, float y_in, float* x_out, float* y_out) {
+    float deadzone = dc_joystick_deadzone / 100.0f;
+    float magnitude = std::sqrt(x_in * x_in + y_in * y_in);
+    if (magnitude < deadzone) {
+        *x_out = 0.0f;
+        *y_out = 0.0f;
+    } else {
+        float scale = (magnitude - deadzone) / (1.0f - deadzone) / magnitude;
+        *x_out = x_in * scale;
+        *y_out = y_in * scale;
+    }
+}
+
+void set_right_analog_suppressed(bool /*suppressed*/) {
+    // No right analog stick on Dreamcast.
+}
+
+// ── Input scanning (no-op on Dreamcast) ─────────────────────────────
+static InputField dc_scanned_input{};
+static int        dc_scanned_input_index = -1;
+
+void start_scanning_input(InputDevice /*device*/) {}
+void stop_scanning_input() {}
+
+void finish_scanning_input(InputField scanned_field) {
+    dc_scanned_input = scanned_field;
+}
+
+void cancel_scanning_input() {
+    dc_scanned_input = {};
+}
+
+InputField get_scanned_input() {
+    InputField ret = dc_scanned_input;
+    dc_scanned_input = {};
+    return ret;
+}
+
+int get_scanned_input_index() {
+    return dc_scanned_input_index;
+}
+
+void config_menu_set_cont_or_kb(bool /*cont_interacted*/) {
+    // No menu on Dreamcast.
+}
+
+// ── Input enable flags ───────────────────────────────────────────────
+// Game input is disabled while a menu context is visible so that joystick
+// and button events are consumed by the UI and not forwarded to the game.
+bool game_input_disabled() {
+    return recompui::is_any_context_shown();
+}
+
+bool all_input_disabled() {
+    return false;
+}
+
+// ── Background input mode ────────────────────────────────────────────
+// Dreamcast has no window focus; background input mode is always On.
+static BackgroundInputMode dc_background_input_mode = BackgroundInputMode::On;
+
+BackgroundInputMode get_background_input_mode() {
+    return dc_background_input_mode;
+}
+
+void set_background_input_mode(BackgroundInputMode mode) {
+    dc_background_input_mode = mode;
+}
+
+} // namespace recomp
+
+// ── Default input mappings ───────────────────────────────────────────
+// On Dreamcast, input comes directly from the Maple bus controller via
+// get_n64_input() above, so the binding tables are intentionally empty.
+// config.cpp uses these to initialise the binding arrays on startup.
+
+namespace recomp {
+const DefaultN64Mappings default_n64_keyboard_mappings = {};
+const DefaultN64Mappings default_n64_controller_mappings = {};
 } // namespace recomp
 
 #endif // DREAMCAST

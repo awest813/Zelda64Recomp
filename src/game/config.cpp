@@ -131,6 +131,9 @@ namespace recomp {
     }
 }
 
+// On Dreamcast, get_app_folder_path() is implemented in dc_support.cpp
+// (it returns the VMU mount point for save/config storage).
+#ifndef DREAMCAST
 std::filesystem::path zelda64::get_app_folder_path() {
    // directly check for portable.txt (windows and native linux binary)
    if (std::filesystem::exists("portable.txt")) {
@@ -186,6 +189,7 @@ std::filesystem::path zelda64::get_app_folder_path() {
 
     return recomp_dir;
 }
+#endif // !DREAMCAST
 
 bool read_json(std::ifstream input_file, nlohmann::json& json_out) {
     if (!input_file.good()) {

@@ -19,6 +19,7 @@
 #include <dc/sound/stream.h>
 
 #include "dreamcast_platform.h"
+#include "zelda_sound.h"
 
 namespace {
 
@@ -36,8 +37,7 @@ static snd_stream_hnd_t stream_handle = SND_STREAM_INVALID;
 
 static uint32_t current_sample_rate = 48000;
 // Volume scaling factor applied to all queued samples.
-// TODO: Wire this to zelda64::get_main_volume() once the config system is
-// fully integrated on Dreamcast.
+// Refreshed from zelda64::get_main_volume() on each call to aica_queue_samples().
 static float volume_scale = 1.0f;
 
 size_t ring_available() {
@@ -112,6 +112,9 @@ void aica_shutdown() {
 }
 
 void aica_queue_samples(const int16_t* samples, size_t sample_count) {
+    // Refresh volume from config on each call (cheap atomic load).
+    volume_scale = zelda64::get_main_volume() / 100.0f;
+
     // Convert from the game's format (16-bit interleaved stereo with swapped
     // channels due to N64 endianness) to normal interleaved stereo.
     // Apply volume scaling.

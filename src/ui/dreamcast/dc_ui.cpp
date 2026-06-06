@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <functional>
 #include <vector>
 #include <list>
@@ -22,6 +23,7 @@
 #include <dc/pvr.h>
 #include <dc/biosfont.h>
 
+#include "recomp_ui.h"
 #include "dreamcast_platform.h"
 
 namespace {
@@ -49,48 +51,44 @@ static MenuState current_menu{};
 constexpr uint32_t COLOR_WHITE      = 0xFFFFFFFF;
 constexpr uint32_t COLOR_YELLOW     = 0xFFFFFF00;
 constexpr uint32_t COLOR_GRAY       = 0xFF808080;
-constexpr uint32_t COLOR_BG         = 0xC0000020;
-constexpr uint32_t COLOR_HIGHLIGHT  = 0x80004080;
 
 // Font metrics (BIOS font)
-constexpr int FONT_CHAR_W = 12;
 constexpr int FONT_CHAR_H = 24;
 constexpr int MENU_PADDING = 20;
 constexpr int MENU_ITEM_SPACING = 4;
 
 void draw_bios_text(int x, int y, uint32_t color, const char* text) {
-    // KOS bios_font_draw_str renders directly to the framebuffer.
-    // vram_s is a KOS-provided pointer to the 16-bit VRAM framebuffer
-    // (defined in <dc/video.h> as: extern uint16 *vram_s).
-    //
-    // TODO: Implement proper PVR-based text rendering by:
-    // 1. Pre-rendering the BIOS font glyphs to a PVR texture atlas
-    // 2. Drawing textured quads for each character
-    (void)color;
-    bios_font_draw_str(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH, 0, text);
+    // Convert ARGB32 color to RGB565 for the Dreamcast framebuffer.
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    uint16_t fg565 = static_cast<uint16_t>(
+        ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    // Use a solid dark background (black, 0x0000) behind each character.
+    uint16_t bg565 = 0x0000u;
+    bios_font_draw_str_ex(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH,
+                          fg565, bg565, text);
 }
+
+// A fixed ContextId slot for the single Dreamcast menu context.
+constexpr uint32_t DC_MENU_CONTEXT_SLOT = 1;
+constexpr uint32_t DC_NULL_CONTEXT_SLOT = 0;
 
 } // anonymous namespace
 
-// ── recompui namespace stubs ────────────────────────────────────────
-// These functions implement the recomp_ui.h interface with minimal
-// Dreamcast-appropriate behavior.
+// ── recompui namespace ───────────────────────────────────────────────
+// Implements the recomp_ui.h interface with minimal Dreamcast-appropriate
+// behavior. SDL events, RmlUi elements, and keyboard input are all absent.
 
 namespace recompui {
 
-void queue_event(const void* /*event*/) {
-    // No SDL events on Dreamcast
-}
+// ── Context management ───────────────────────────────────────────────
 
-bool try_deque_event(void* /*out*/) {
-    return false;
-}
-
-void show_context(uint32_t /*context*/, std::string_view /*param*/) {
+void show_context(ContextId /*context*/, std::string_view /*param*/) {
     current_menu.visible = true;
 }
 
-void hide_context(uint32_t /*context*/) {
+void hide_context(ContextId /*context*/) {
     current_menu.visible = false;
 }
 
@@ -98,7 +96,7 @@ void hide_all_contexts() {
     current_menu.visible = false;
 }
 
-bool is_context_shown(uint32_t /*context*/) {
+bool is_context_shown(ContextId /*context*/) {
     return current_menu.visible;
 }
 
@@ -114,6 +112,36 @@ bool is_any_context_shown() {
     return current_menu.visible;
 }
 
+ContextId try_close_current_context() {
+    current_menu.visible = false;
+    return ContextId{DC_NULL_CONTEXT_SLOT};
+}
+
+ContextId get_launcher_context_id() {
+    return ContextId{DC_MENU_CONTEXT_SLOT};
+}
+
+ContextId get_config_context_id() {
+    return ContextId{DC_MENU_CONTEXT_SLOT};
+}
+
+ContextId get_config_sub_menu_context_id() {
+    return ContextId{DC_MENU_CONTEXT_SLOT};
+}
+
+// ── Config tab stubs ─────────────────────────────────────────────────
+
+void set_config_tab(ConfigTab /*tab*/) {}
+
+int config_tab_to_index(ConfigTab tab) {
+    return static_cast<int>(tab);
+}
+
+void set_config_tabset_mod_nav() {}
+void focus_mod_configure_button() {}
+
+// ── Display / cursor ─────────────────────────────────────────────────
+
 void get_window_size(int& width, int& height) {
     width = DC_SCREEN_WIDTH;
     height = DC_SCREEN_HEIGHT;
@@ -127,41 +155,36 @@ void toggle_fullscreen() {
     // Always fullscreen on Dreamcast
 }
 
+// ── Controller / mouse active flags ─────────────────────────────────
+
 bool get_cont_active() {
     return true; // Controller is always the active input device
 }
 
-void set_cont_active(bool /*active*/) {
-    // Always active
-}
+void set_cont_active(bool /*active*/) {}
 
 void activate_mouse() {
-    // No mouse
+    // No mouse on Dreamcast
 }
+
+// ── Error display ────────────────────────────────────────────────────
 
 void message_box(const char* msg) {
     fprintf(stderr, "[DC UI] %s\n", msg);
 }
 
-void set_render_hooks() {
-    // No render hooks needed for minimal UI
-}
+// ── Rendering hooks ──────────────────────────────────────────────────
 
-void update_supported_options() {
-    // Dreamcast has fixed capabilities
-}
+void set_render_hooks() {}
+void update_supported_options() {}
+void apply_color_hack() {}
 
-void apply_color_hack() {
-    // Not applicable
-}
+// ── Styling / prompt init ────────────────────────────────────────────
 
-void init_styling(const std::filesystem::path& /*rcss_file*/) {
-    // No CSS styling on Dreamcast
-}
+void init_styling(const std::filesystem::path& /*rcss_file*/) {}
+void init_prompt_context() {}
 
-void init_prompt_context() {
-    // Minimal init
-}
+// ── Choice / info / notification prompts ────────────────────────────
 
 void open_choice_prompt(
     const std::string& header_text,
@@ -170,8 +193,8 @@ void open_choice_prompt(
     const std::string& cancel_label_text,
     std::function<void()> confirm_action,
     std::function<void()> cancel_action,
-    int /*confirm_variant*/,
-    int /*cancel_variant*/,
+    ButtonVariant /*confirm_variant*/,
+    ButtonVariant /*cancel_variant*/,
     bool /*focus_on_cancel*/,
     const std::string& /*return_element_id*/) {
 
@@ -183,6 +206,29 @@ void open_choice_prompt(
     current_menu.visible = true;
 }
 
+void open_info_prompt(
+    const std::string& header_text,
+    const std::string& /*content_text*/,
+    const std::string& okay_label_text,
+    std::function<void()> okay_action,
+    ButtonVariant /*okay_variant*/,
+    const std::string& /*return_element_id*/) {
+
+    current_menu.title = header_text;
+    current_menu.entries.clear();
+    current_menu.entries.push_back({okay_label_text, okay_action, true});
+    current_menu.selected_index = 0;
+    current_menu.visible = true;
+}
+
+void open_notification(
+    const std::string& header_text,
+    const std::string& content_text,
+    const std::string& /*return_element_id*/) {
+
+    fprintf(stdout, "[DC UI] %s: %s\n", header_text.c_str(), content_text.c_str());
+}
+
 void close_prompt() {
     current_menu.visible = false;
 }
@@ -190,6 +236,8 @@ void close_prompt() {
 bool is_prompt_open() {
     return current_menu.visible;
 }
+
+// ── Mod list / game start ────────────────────────────────────────────
 
 void update_mod_list(bool /*scan_mods*/) {
     // Mods not supported on Dreamcast
@@ -199,43 +247,28 @@ void process_game_started() {
     current_menu.visible = false;
 }
 
-void queue_image_from_bytes_rgba32(const std::string& /*src*/, const std::vector<char>& /*bytes*/, uint32_t /*width*/, uint32_t /*height*/) {
-    // Not supported
-}
+// ── Image management (no-ops on Dreamcast) ───────────────────────────
 
-void queue_image_from_bytes_file(const std::string& /*src*/, const std::vector<char>& /*bytes*/) {
-    // Not supported
-}
+void queue_image_from_bytes_rgba32(const std::string& /*src*/, const std::vector<char>& /*bytes*/, uint32_t /*width*/, uint32_t /*height*/) {}
+void queue_image_from_bytes_file(const std::string& /*src*/, const std::vector<char>& /*bytes*/) {}
+void release_image(const std::string& /*src*/) {}
 
-void release_image(const std::string& /*src*/) {
-    // Not supported
-}
+void drop_files(const std::list<std::filesystem::path>& /*file_list*/) {}
 
-void drop_files(const std::list<std::filesystem::path>& /*file_list*/) {
-    // Not supported
-}
-
-// ── Menu rendering (called during PVR scene) ────────────────────────
+// ── Menu rendering (called during PVR scene) ─────────────────────────
 
 void render_menu_overlay() {
     if (!current_menu.visible) return;
 
-    // This would be called during the PVR scene to overlay menu graphics.
-    // For the initial implementation, render using BIOS font.
-    //
-    // TODO: Implement proper PVR polygon-based menu rendering with:
-    // - Background quad with semi-transparent dark overlay
-    // - Text rendered via pre-baked font texture atlas
-    // - Highlight bar for selected item
-    // - Smooth scrolling for long lists
+    // Render using the Dreamcast BIOS bitmap font with RGB565 colors.
+    // Text is drawn directly to the framebuffer; a future improvement would
+    // be to composite via a PVR semi-transparent background quad.
 
     int y = MENU_PADDING;
 
-    // Title
     draw_bios_text(MENU_PADDING, y, COLOR_WHITE, current_menu.title.c_str());
     y += FONT_CHAR_H + MENU_ITEM_SPACING * 2;
 
-    // Menu items
     for (size_t i = 0; i < current_menu.entries.size(); i++) {
         uint32_t color = COLOR_WHITE;
         if (!current_menu.entries[i].enabled) {
@@ -252,11 +285,12 @@ void render_menu_overlay() {
     }
 }
 
-// Handle menu input (called from the input polling path)
+// ── Menu input handling ───────────────────────────────────────────────
+// Called from the input polling path with raw Dreamcast button bitmask.
+
 void handle_menu_input(uint32_t buttons_pressed) {
     if (!current_menu.visible || current_menu.entries.empty()) return;
 
-    // D-pad up/down to navigate
     if (buttons_pressed & CONT_DPAD_UP) {
         current_menu.selected_index--;
         if (current_menu.selected_index < 0) {
@@ -270,7 +304,7 @@ void handle_menu_input(uint32_t buttons_pressed) {
         }
     }
 
-    // A button to confirm
+    // A → confirm selection
     if (buttons_pressed & CONT_A) {
         auto& entry = current_menu.entries[current_menu.selected_index];
         if (entry.enabled && entry.action) {
@@ -278,7 +312,7 @@ void handle_menu_input(uint32_t buttons_pressed) {
         }
     }
 
-    // B button to go back / cancel
+    // B → close / cancel
     if (buttons_pressed & CONT_B) {
         current_menu.visible = false;
     }

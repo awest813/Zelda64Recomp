@@ -75,6 +75,10 @@ void recomp::set_input_binding(recomp::GameInput input, size_t binding_index, re
     }
 }
 
+// On Dreamcast, dc_input.cpp provides a platform-specific get_n64_input() that
+// reads directly from the Maple bus controller. The binding-based version below
+// is only compiled for PC platforms where SDL input is available.
+#ifndef DREAMCAST
 bool recomp::get_n64_input(int controller_num, uint16_t* buttons_out, float* x_out, float* y_out) {
     uint16_t cur_buttons = 0;
     float cur_x = 0.0f;
@@ -114,3 +118,4 @@ bool recomp::get_n64_input(int controller_num, uint16_t* buttons_out, float* x_o
 
     return true;
 }
+#endif // !DREAMCAST

@@ -59,13 +59,6 @@ namespace dreamcast {
     void platform_init();
     void platform_shutdown();
 
-    // ── Display ─────────────────────────────────────────────────────
-    // Initialize the PVR (PowerVR2) graphics hardware.
-    void pvr_init();
-    void pvr_shutdown();
-    void pvr_begin_frame();
-    void pvr_end_frame();
-
     // ── Input ───────────────────────────────────────────────────────
     // Poll maple bus devices and update controller state.
     void maple_poll();

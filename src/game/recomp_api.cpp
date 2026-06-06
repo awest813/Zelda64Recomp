@@ -115,7 +115,12 @@ extern "C" void recomp_load_overlays(uint8_t * rdram, recomp_context * ctx) {
 }
 
 extern "C" void recomp_high_precision_fb_enabled(uint8_t * rdram, recomp_context * ctx) {
+#ifndef DREAMCAST
     _return(ctx, static_cast<s32>(zelda64::renderer::RT64HighPrecisionFBEnabled()));
+#else
+    // PVR renderer does not support high-precision framebuffers.
+    _return(ctx, static_cast<s32>(0));
+#endif
 }
 
 extern "C" void recomp_get_resolution_scale(uint8_t* rdram, recomp_context* ctx) {
