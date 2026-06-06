@@ -4,9 +4,10 @@
 // the ultramodern::renderer::RendererContext interface using KallistiOS PVR
 // APIs to drive the PowerVR2 tile-based deferred renderer.
 //
-// The N64 display list commands are translated into PVR polygon submissions.
-// Due to hardware limitations, many N64 RDP features (multi-cycle blending,
-// noise dithering, per-pixel depth compare) are approximated or omitted.
+// Display lists are high-level-emulated (F3DZEX2) and geometry is submitted
+// directly to the PVR tile accelerator (SM64 DC port architecture). Many N64
+// RDP features (texturing, combiners, multi-cycle blending) are not yet
+// implemented.
 
 #ifdef DREAMCAST
 
@@ -27,6 +28,7 @@
 #include "ultramodern/ultra64.h"
 #include "dreamcast_platform.h"
 #include "dc_gbi.h"
+#include "dc_pvr_renderer.h"
 
 namespace {
 
@@ -238,6 +240,7 @@ private:
     void process_display_list(const OSTask* task);
 
     dreamcast::gbi::Interpreter gbi_;
+    dreamcast::pvr::Renderer pvr_renderer_;
 };
 
 PVRContext::PVRContext(uint8_t* rdram, ultramodern::renderer::WindowHandle /*window_handle*/, bool developer_mode)
@@ -338,18 +341,23 @@ void PVRContext::enable_instant_present() {
 }
 
 void PVRContext::send_dl(const OSTask* task) {
+    // Begin the PVR scene on the first display list of the frame; subsequent
+    // Gfx tasks append geometry before update_screen() presents.
+    pvr_renderer_.begin_frame();
+    gbi_.set_renderer(&pvr_renderer_);
     process_display_list(task);
 }
 
 void PVRContext::update_screen() {
-    // Begin a PVR scene, render the current N64 framebuffer, and present.
-    pvr_wait_ready();
-    pvr_scene_begin();
-
-    // Render framebuffer as a textured quad
-    render_framebuffer_to_screen();
-
-    pvr_scene_finish();
+    if (pvr_renderer_.scene_active()) {
+        pvr_renderer_.end_frame();
+    } else {
+        // Fallback: no Gfx tasks ran this frame; present VI framebuffer if set.
+        pvr_wait_ready();
+        pvr_scene_begin();
+        render_framebuffer_to_screen();
+        pvr_scene_finish();
+    }
     current_frame++;
 }
 
@@ -545,8 +553,6 @@ void PVRContext::process_display_list(const OSTask* task) {
         return;
     }
 
-    // Software F3DZEX2 interpreter: rasterize Gfx/RDP commands into RDRAM.
-    // update_screen() then blits the framebuffer to the PVR output.
     gbi_.process_display_list(rdram_, task);
 }
 

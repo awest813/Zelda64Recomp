@@ -122,7 +122,7 @@ Place the game ROM on the disc as `/cd/rom.z64`.
 ### Important Notes
 
 - **This port is highly experimental.** The Dreamcast has only 16 MB of RAM and a 200 MHz SH-4 CPU — performance is expected to be challenging.
-- The RT64 renderer is replaced with a PVR (PowerVR2) renderer. A software F3DZEX2 display list interpreter rasterizes Gfx/RDP commands into RDRAM; the presentation path then blits that framebuffer to the screen. This is an early implementation: textured geometry, combiners, depth, and S2DEX2 are not yet supported.
+- The RT64 renderer is replaced with a PVR (PowerVR2) renderer using the SM64 DC port architecture: a F3DZEX2 high-level emulator submits triangles and fill rectangles directly to the PVR tile accelerator. Texturing, color combiners, and S2DEX2 are not yet supported; the VI framebuffer blit path remains as a fallback when no Gfx tasks run.
 - The RmlUi menu system is replaced with a minimal BIOS-font-based menu.
 - The mod system is disabled on Dreamcast.
 - Save data is stored on VMU (Visual Memory Unit).

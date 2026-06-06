@@ -7,10 +7,15 @@
 
 struct OSTask;
 
+namespace dreamcast::pvr {
+class Renderer;
+}
+
 namespace dreamcast::gbi {
 
-// Software F3DZEX2 display list interpreter for the Dreamcast port.
-// Rasterizes into N64 RDRAM; presentation is handled by the PVR framebuffer blit.
+// F3DZEX2 display list high-level emulator for the Dreamcast port.
+// Gfx commands update RSP state; triangles and fill rects are submitted to the
+// PVR backend (SM64-style) instead of software-rasterizing into RDRAM.
 class Interpreter {
 public:
     Interpreter();
@@ -20,6 +25,7 @@ public:
     Interpreter& operator=(const Interpreter&) = delete;
 
     void reset();
+    void set_renderer(pvr::Renderer* renderer);
     void process_display_list(uint8_t* rdram, const OSTask* task);
 
 private:

@@ -1,12 +1,12 @@
-// Dreamcast software F3DZEX2 / RDP display list interpreter.
+// Dreamcast F3DZEX2 / RDP display list high-level emulator.
 //
-// Minimal high-level emulation of the N64 graphics pipeline: Gfx commands update
-// RSP state, RDP commands rasterize into RDRAM. The PVR renderer blits the
-// resulting framebuffer to the screen in dc_render_context.cpp.
+// Gfx commands update RSP state; geometry is submitted directly to the PVR
+// tile accelerator via dc_pvr_renderer (SM64 DC port architecture).
 
 #ifdef DREAMCAST
 
 #include "dc_gbi.h"
+#include "dc_pvr_renderer.h"
 
 #include <algorithm>
 #include <array>
@@ -175,6 +175,7 @@ struct Viewport {
 struct TransformedVertex {
     float screen_x = 0.0f;
     float screen_y = 0.0f;
+    float depth = 0.5f;
     float w = 1.0f;
     uint8_t r = 255;
     uint8_t g = 255;
@@ -237,6 +238,7 @@ static void mat4_transform(const float m[4][4], float x, float y, float z, float
 
 struct GbiState {
     uint8_t* rdram = nullptr;
+    pvr::Renderer* renderer = nullptr;
 
     std::array<uint32_t, MAX_SEGMENTS> segments{};
     float model_matrix[4][4]{};
@@ -311,6 +313,8 @@ struct GbiState {
         const float inv_w = 1.0f / tw;
         out.screen_x = (tx * inv_w) * viewport.scale[0] + viewport.translate[0];
         out.screen_y = (ty * -inv_w) * viewport.scale[1] + viewport.translate[1];
+        const float ndc_z = tz * inv_w;
+        out.depth = std::clamp((ndc_z + 1.0f) * 0.5f, 0.0f, 1.0f);
         out.r = v.r;
         out.g = v.g;
         out.b = v.b;
@@ -318,36 +322,11 @@ struct GbiState {
         vtx_loaded[index] = 1;
     }
 
-    uint16_t* color_fb_ptr() const {
-        if (color_image.address == 0 || rdram == nullptr) {
-            return nullptr;
-        }
-        return reinterpret_cast<uint16_t*>(rdram + color_image.address);
-    }
-
-    void write_rgba5551(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-        if (!scissor_stack[scissor_stack_size - 1].contains_pixel(x, y)) {
-            return;
-        }
-
-        uint16_t* fb = color_fb_ptr();
-        if (fb == nullptr || color_image.width == 0) {
-            return;
-        }
-
-        if (x < 0 || y < 0) {
-            return;
-        }
-
-        const uint32_t width = color_image.width;
-        if (static_cast<uint32_t>(x) >= width) {
-            return;
-        }
-
-        const uint16_t pixel = static_cast<uint16_t>(
-            ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a > 127 ? 1 : 0)
-        );
-        fb[static_cast<size_t>(y) * width + static_cast<size_t>(x)] = pixel;
+    static uint32_t pack_argb(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        return (static_cast<uint32_t>(a) << 24)
+             | (static_cast<uint32_t>(r) << 16)
+             | (static_cast<uint32_t>(g) << 8)
+             | static_cast<uint32_t>(b);
     }
 
     void unpack_color(uint32_t rgba, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) const {
@@ -378,19 +357,12 @@ struct GbiState {
         uint8_t r, g, b, a;
         unpack_color(color, r, g, b, a);
 
-        const int x0 = static_cast<int>(ulx / 4);
-        const int y0 = static_cast<int>(uly / 4);
-        const int x1 = static_cast<int>((lrx + 3) / 4);
-        const int y1 = static_cast<int>((lry + 3) / 4);
-
-        for (int y = y0; y < y1; y++) {
-            for (int x = x0; x < x1; x++) {
-                write_rgba5551(x, y, r, g, b, a);
-            }
+        if (renderer != nullptr) {
+            renderer->submit_fill_rect(ulx, uly, lrx, lry, pack_argb(r, g, b, a));
         }
     }
 
-    void rasterize_triangle(uint8_t i0, uint8_t i1, uint8_t i2) {
+    void submit_triangle(uint8_t i0, uint8_t i1, uint8_t i2) {
         if (i0 >= MAX_VERTICES || i1 >= MAX_VERTICES || i2 >= MAX_VERTICES) {
             return;
         }
@@ -421,17 +393,7 @@ struct GbiState {
             return;
         }
 
-        float x0 = v0.screen_x, y0 = v0.screen_y;
-        float x1 = v1.screen_x, y1 = v1.screen_y;
-        float x2 = v2.screen_x, y2 = v2.screen_y;
-
-        const int min_x = static_cast<int>(std::floor(std::min({x0, x1, x2})));
-        const int max_x = static_cast<int>(std::ceil(std::max({x0, x1, x2})));
-        const int min_y = static_cast<int>(std::floor(std::min({y0, y1, y2})));
-        const int max_y = static_cast<int>(std::ceil(std::max({y0, y1, y2})));
-
-        const float area = cross;
-        if (std::fabs(area) < 1e-6f) {
+        if (renderer == nullptr) {
             return;
         }
 
@@ -439,39 +401,32 @@ struct GbiState {
         uint8_t pr, pg, pb, pa;
         unpack_color(prim_color, pr, pg, pb, pa);
 
-        for (int y = min_y; y <= max_y; y++) {
-            for (int x = min_x; x <= max_x; x++) {
-                const float px = static_cast<float>(x) + 0.5f;
-                const float py = static_cast<float>(y) + 0.5f;
+        uint8_t r0, g0, b0, a0;
+        uint8_t r1, g1, b1, a1;
+        uint8_t r2, g2, b2, a2;
 
-                const float w0 = ((x1 - x2) * (py - y2) + (y2 - y1) * (px - x2)) / area;
-                const float w1 = ((x2 - x0) * (py - y0) + (y0 - y2) * (px - x0)) / area;
-                const float w2 = 1.0f - w0 - w1;
-
-                if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) {
-                    continue;
-                }
-
-                uint8_t r, g, b, a;
-                if (use_shade) {
-                    r = static_cast<uint8_t>(v0.r * w0 + v1.r * w1 + v2.r * w2);
-                    g = static_cast<uint8_t>(v0.g * w0 + v1.g * w1 + v2.g * w2);
-                    b = static_cast<uint8_t>(v0.b * w0 + v1.b * w1 + v2.b * w2);
-                    a = static_cast<uint8_t>(v0.a * w0 + v1.a * w1 + v2.a * w2);
-                } else {
-                    r = pr;
-                    g = pg;
-                    b = pb;
-                    a = pa;
-                }
-
-                write_rgba5551(x, y, r, g, b, a);
-            }
+        if (use_shade) {
+            r0 = v0.r; g0 = v0.g; b0 = v0.b; a0 = v0.a;
+            r1 = v1.r; g1 = v1.g; b1 = v1.b; a1 = v1.a;
+            r2 = v2.r; g2 = v2.g; b2 = v2.b; a2 = v2.a;
+        } else {
+            r0 = r1 = r2 = pr;
+            g0 = g1 = g2 = pg;
+            b0 = b1 = b2 = pb;
+            a0 = a1 = a2 = pa;
         }
+
+        const bool translucent = (a0 < 255) || (a1 < 255) || (a2 < 255);
+        renderer->submit_triangle(
+            v0.screen_x, v0.screen_y, v0.depth, pack_argb(r0, g0, b0, a0),
+            v1.screen_x, v1.screen_y, v1.depth, pack_argb(r1, g1, b1, a1),
+            v2.screen_x, v2.screen_y, v2.depth, pack_argb(r2, g2, b2, a2),
+            translucent
+        );
     }
 
     void draw_tri(uint8_t a, uint8_t b, uint8_t c) {
-        rasterize_triangle(a, b, c);
+        submit_triangle(a, b, c);
     }
 
     void load_vertices(uint32_t address, uint8_t count, uint8_t dst_index) {
@@ -550,6 +505,9 @@ struct GbiState {
         color_image.siz = siz;
         color_image.width = width;
         color_image.address = from_segmented(address) & 0x00FFFFFF;
+        if (renderer != nullptr && width > 0) {
+            renderer->set_framebuffer_size(width, 240);
+        }
     }
 
     void set_scissor(uint8_t mode, int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
@@ -932,8 +890,10 @@ void Interpreter::reset() {
         impl_ = new Impl();
     }
 
+    pvr::Renderer* renderer = impl_->state.renderer;
     GbiState& s = impl_->state;
     s = GbiState{};
+    s.renderer = renderer;
     mat4_identity(s.model_matrix);
     mat4_identity(s.proj_matrix);
     mat4_identity(s.model_stack[0]);
@@ -941,6 +901,13 @@ void Interpreter::reset() {
     s.geometry_mode = G_CULL_BACK;
     s.other_mode_h = 0x080CFF;
     s.force_branch = true;
+}
+
+void Interpreter::set_renderer(pvr::Renderer* renderer) {
+    if (impl_ == nullptr) {
+        reset();
+    }
+    impl_->state.renderer = renderer;
 }
 
 void Interpreter::process_display_list(uint8_t* rdram, const OSTask* task) {
