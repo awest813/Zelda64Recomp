@@ -4,9 +4,120 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <functional>
+#include <vector>
 #include <list>
+#include <filesystem>
+#include <cstdint>
 
 // TODO move this file into src/ui
+
+#ifdef DREAMCAST
+// ── Dreamcast build: no SDL or RmlUi available ───────────────────────────────
+// Provide a minimal set of declarations sufficient for the Dreamcast port.
+// The full PC API (SDL events, RmlUi element access) is omitted.
+
+namespace recompui {
+
+    // Minimal ContextId for Dreamcast: wraps a plain slot index.
+    struct ContextId {
+        uint32_t slot_id = 0;
+        auto operator<=>(const ContextId& rhs) const = default;
+    };
+
+    enum class ConfigTab {
+        General,
+        Controls,
+        Graphics,
+        Sound,
+        Mods,
+        Debug,
+    };
+
+    enum class ButtonVariant {
+        Primary,
+        Secondary,
+        Tertiary,
+        Success,
+        Error,
+        Warning,
+        NumVariants,
+    };
+
+    void show_context(ContextId context, std::string_view param);
+    void hide_context(ContextId context);
+    void hide_all_contexts();
+    bool is_context_shown(ContextId context);
+    bool is_context_capturing_input();
+    bool is_context_capturing_mouse();
+    bool is_any_context_shown();
+    ContextId try_close_current_context();
+
+    ContextId get_launcher_context_id();
+    ContextId get_config_context_id();
+    ContextId get_config_sub_menu_context_id();
+
+    void set_config_tab(ConfigTab tab);
+    int config_tab_to_index(ConfigTab tab);
+    void set_config_tabset_mod_nav();
+    void focus_mod_configure_button();
+
+    void init_styling(const std::filesystem::path& rcss_file);
+    void init_prompt_context();
+    void open_choice_prompt(
+        const std::string& header_text,
+        const std::string& content_text,
+        const std::string& confirm_label_text,
+        const std::string& cancel_label_text,
+        std::function<void()> confirm_action,
+        std::function<void()> cancel_action,
+        ButtonVariant confirm_variant = ButtonVariant::Success,
+        ButtonVariant cancel_variant = ButtonVariant::Error,
+        bool focus_on_cancel = true,
+        const std::string& return_element_id = ""
+    );
+    void open_info_prompt(
+        const std::string& header_text,
+        const std::string& content_text,
+        const std::string& okay_label_text,
+        std::function<void()> okay_action,
+        ButtonVariant okay_variant = ButtonVariant::Error,
+        const std::string& return_element_id = ""
+    );
+    void open_notification(
+        const std::string& header_text,
+        const std::string& content_text,
+        const std::string& return_element_id = ""
+    );
+    void close_prompt();
+    bool is_prompt_open();
+    void update_mod_list(bool scan_mods = true);
+    void process_game_started();
+
+    void apply_color_hack();
+    void get_window_size(int& width, int& height);
+    void set_cursor_visible(bool visible);
+    void update_supported_options();
+    void toggle_fullscreen();
+
+    bool get_cont_active();
+    void set_cont_active(bool active);
+    void activate_mouse();
+
+    void message_box(const char* msg);
+
+    void set_render_hooks();
+
+    void queue_image_from_bytes_rgba32(const std::string& src, const std::vector<char>& bytes, uint32_t width, uint32_t height);
+    void queue_image_from_bytes_file(const std::string& src, const std::vector<char>& bytes);
+    void release_image(const std::string& src);
+
+    void drop_files(const std::list<std::filesystem::path>& file_list);
+
+} // namespace recompui
+
+#else // !DREAMCAST – full PC build with SDL and RmlUi
+// ── PC build ─────────────────────────────────────────────────────────────────
 
 #include "SDL.h"
 #include "RmlUi/Core.h"
@@ -143,4 +254,6 @@ namespace recompui {
     void drop_files(const std::list<std::filesystem::path> &file_list);
 }
 
-#endif
+#endif // DREAMCAST
+
+#endif // __RECOMP_UI__

@@ -150,17 +150,8 @@ void disable_texture_pack(recomp::mods::ModContext&, const recomp::mods::ModHand
 void reorder_texture_pack(recomp::mods::ModContext&) {}
 
 // ── Error handling ──────────────────────────────────────────────────
-
-namespace recompui {
-    void message_box(const char* msg) {
-        fprintf(stderr, "[DC ERROR] %s\n", msg);
-        // On Dreamcast, we can't show a dialog; print to debug console
-    }
-
-    void update_supported_options() {
-        // No-op on Dreamcast
-    }
-}
+// Note: recompui::message_box() and recompui::update_supported_options()
+// are implemented in dc_ui.cpp; no duplicate definitions here.
 
 // ── Main ────────────────────────────────────────────────────────────
 

@@ -186,6 +186,7 @@ if (DREAMCAST)
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_support.cpp
         ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_input.cpp
+        ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_config.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/dreamcast/dc_ui.cpp
     )
 else()
