@@ -26,6 +26,7 @@
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultra64.h"
 #include "dreamcast_platform.h"
+#include "dc_gbi.h"
 
 namespace {
 
@@ -235,6 +236,8 @@ private:
     void render_framebuffer_to_screen();
     void render_solid_quad(uint32_t argb);
     void process_display_list(const OSTask* task);
+
+    dreamcast::gbi::Interpreter gbi_;
 };
 
 PVRContext::PVRContext(uint8_t* rdram, ultramodern::renderer::WindowHandle /*window_handle*/, bool developer_mode)
@@ -538,26 +541,13 @@ void PVRContext::render_framebuffer_to_screen() {
 }
 
 void PVRContext::process_display_list(const OSTask* task) {
-    // TODO: Implement N64 RDP display list processing.
-    //
-    // The presentation path (update_screen -> render_framebuffer_to_screen)
-    // already reads the N64 framebuffer from RDRAM using VI registers and
-    // blits it to the PVR output. However, without RDP command processing
-    // here the framebuffer will not contain rendered game content.
-    //
-    // This function should parse the display list pointed to by
-    // task->t.data_ptr in RDRAM and translate RDP commands to PVR
-    // polygon submissions. The major command categories to handle:
-    //
-    // 1. Triangles (G_TRI1, G_TRI2)
-    // 2. Texture rectangles (G_TEXRECT)
-    // 3. Fill rectangles (G_FILLRECT)
-    // 4. Texture loading (G_LOADTLUT, G_LOADBLOCK, G_LOADTILE)
-    // 5. Render mode / combiner (G_SETCOMBINE, G_SETOTHERMODE)
-    // 6. Matrix operations (G_MTX, G_POPMTX)
-    // 7. Framebuffer operations (G_SETCOLORIMAGE, G_SETDEPTHIMAGE)
+    if (task == nullptr || rdram_ == nullptr) {
+        return;
+    }
 
-    (void)task;
+    // Software F3DZEX2 interpreter: rasterize Gfx/RDP commands into RDRAM.
+    // update_screen() then blits the framebuffer to the PVR output.
+    gbi_.process_display_list(rdram_, task);
 }
 
 // ── Factory function ────────────────────────────────────────────────

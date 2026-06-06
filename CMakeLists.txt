@@ -183,6 +183,7 @@ if (DREAMCAST)
     list(APPEND SOURCES
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_main.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_render_context.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_gbi.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_support.cpp
         ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_input.cpp
