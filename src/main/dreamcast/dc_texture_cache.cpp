@@ -82,20 +82,6 @@ uint32_t texture_height(const LoadedTexture& tex, const TileState& tile) {
 
 } // anonymous namespace
 
-struct Cache::Entry {
-    const uint8_t* addr = nullptr;
-    uint8_t fmt = 0;
-    uint8_t siz = 0;
-    uint32_t hash = 0;
-    pvr_ptr_t vram = 0;
-    uint16_t width = 0;
-    uint16_t height = 0;
-    uint16_t stride = 0;
-    uint32_t pvr_format = 0;
-    size_t bytes = 0;
-    uint32_t last_used = 0;
-};
-
 Cache::Cache() = default;
 
 Cache::~Cache() {

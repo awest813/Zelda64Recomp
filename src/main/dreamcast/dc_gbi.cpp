@@ -288,6 +288,13 @@ using dreamcast::math::mat4_identity;
 using dreamcast::math::mat4_mul;
 using dreamcast::math::mat4_transform;
 
+// The render/texture/combiner subsystems live under the dreamcast:: namespace;
+// alias them so the file-scope interpreter state can refer to them unqualified.
+namespace pvr = dreamcast::pvr;
+namespace tex = dreamcast::tex;
+namespace tmem = dreamcast::tmem;
+namespace combiner = dreamcast::combiner;
+
 // ── Interpreter state ───────────────────────────────────────────────
 
 struct TextureImage {
@@ -1596,7 +1603,7 @@ struct GbiState {
         }
     }
 
-    static DlHandler gbi_dispatch[256];
+    static inline DlHandler gbi_dispatch[256]{};
 
     static void init_dispatch() {
         static bool initialized = false;
@@ -1656,7 +1663,7 @@ struct GbiState {
         gbi_dispatch[G_LOADTLUT] = dl_loadtlut;
     }
 
-    void run_display_list(GbiState& state, DisplayList* dl) {
+    static void run_display_list(GbiState& state, DisplayList* dl) {
         init_dispatch();
         state.dl_stack.clear();
 
@@ -1693,6 +1700,7 @@ struct GbiState {
             }
         }
     }
+}; // struct GbiState
 
 } // anonymous namespace
 
@@ -1772,7 +1780,7 @@ void Interpreter::process_display_list(uint8_t* rdram, const OSTask* task) {
     }
 
     DisplayList* dl = reinterpret_cast<DisplayList*>(rdram + dl_addr);
-    run_display_list(impl_->state, dl);
+    GbiState::run_display_list(impl_->state, dl);
 }
 
 } // namespace dreamcast::gbi
