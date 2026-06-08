@@ -88,6 +88,15 @@ namespace dreamcast {
     bool gdrom_read_file(const char* path, void* buffer, size_t size);
 }
 
+// ── Dreamcast UI overlay (implemented in src/ui/dreamcast/dc_ui.cpp) ──
+// The render context calls render_menu_overlay() once the PVR frame has been
+// presented; the input backend forwards freshly-pressed Maple buttons to
+// handle_menu_input() while a menu context is visible.
+namespace recompui {
+    void render_menu_overlay();
+    void handle_menu_input(uint32_t buttons_pressed);
+}
+
 #endif // DREAMCAST
 
 #endif // __DREAMCAST_PLATFORM_H__

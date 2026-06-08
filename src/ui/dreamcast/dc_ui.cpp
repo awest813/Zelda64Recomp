@@ -43,6 +43,9 @@ struct MenuState {
     std::vector<MenuEntry> entries;
     int selected_index;
     bool visible;
+    // Invoked when the user presses B (cancel) on a choice prompt; empty for
+    // menus where B simply dismisses.
+    std::function<void()> cancel_action;
 };
 
 static MenuState current_menu{};
@@ -64,10 +67,11 @@ void draw_bios_text(int x, int y, uint32_t color, const char* text) {
     uint8_t b = color & 0xFF;
     uint16_t fg565 = static_cast<uint16_t>(
         ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-    // Use a solid dark background (black, 0x0000) behind each character.
-    uint16_t bg565 = 0x0000u;
-    bios_font_draw_str_ex(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH,
-                          fg565, bg565, text);
+    // Opaque draw over a solid black cell keeps text legible over arbitrary
+    // game frames. (KOS BIOS font API: colors are set separately from the draw.)
+    bfont_set_foreground_color(fg565);
+    bfont_set_background_color(0x0000u);
+    bfont_draw_str(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH, 1 /*opaque*/, text);
 }
 
 // A fixed ContextId slot for the single Dreamcast menu context.
@@ -203,6 +207,7 @@ void open_choice_prompt(
     current_menu.entries.push_back({confirm_label_text, confirm_action, true});
     current_menu.entries.push_back({cancel_label_text, cancel_action, true});
     current_menu.selected_index = 0;
+    current_menu.cancel_action = cancel_action;
     current_menu.visible = true;
 }
 
@@ -218,6 +223,7 @@ void open_info_prompt(
     current_menu.entries.clear();
     current_menu.entries.push_back({okay_label_text, okay_action, true});
     current_menu.selected_index = 0;
+    current_menu.cancel_action = nullptr; // B just dismisses an info prompt
     current_menu.visible = true;
 }
 
@@ -304,17 +310,28 @@ void handle_menu_input(uint32_t buttons_pressed) {
         }
     }
 
-    // A → confirm selection
-    if (buttons_pressed & CONT_A) {
-        auto& entry = current_menu.entries[current_menu.selected_index];
-        if (entry.enabled && entry.action) {
-            entry.action();
+    // A / Start → confirm selection. Snapshot the action first: invoking it may
+    // mutate (or replace) current_menu, which would invalidate the reference.
+    if (buttons_pressed & (CONT_A | CONT_START)) {
+        const int idx = current_menu.selected_index;
+        if (idx >= 0 && idx < static_cast<int>(current_menu.entries.size())) {
+            const MenuEntry& entry = current_menu.entries[idx];
+            if (entry.enabled && entry.action) {
+                auto action = entry.action;
+                action();
+            }
         }
+        return;
     }
 
-    // B → close / cancel
+    // B → cancel: hide first, then fire the cancel callback (which may open a
+    // new menu of its own).
     if (buttons_pressed & CONT_B) {
+        auto cancel = current_menu.cancel_action;
         current_menu.visible = false;
+        if (cancel) {
+            cancel();
+        }
     }
 }
 

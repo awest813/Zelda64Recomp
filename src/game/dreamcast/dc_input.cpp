@@ -59,6 +59,9 @@ struct DCControllerState {
 
 static DCControllerState dc_controller{};
 static std::atomic<bool> rumble_requested{false};
+// Previous frame's raw button mask, for edge detection (menu navigation needs
+// freshly-pressed buttons, not held state).
+static uint32_t prev_buttons = 0;
 
 // Dreamcast button bitmasks (active LOW in hardware, KOS inverts for us)
 // KOS cont_state_t uses CONT_* defines
@@ -156,6 +159,14 @@ void maple_poll() {
 
     dc_controller.connected = true;
     dc_controller.buttons = state->buttons;
+
+    // Route freshly-pressed buttons to the menu overlay while it is visible.
+    // Edge detection prevents a held D-pad from racing through entries.
+    const uint32_t pressed = state->buttons & ~prev_buttons;
+    prev_buttons = state->buttons;
+    if (recompui::is_any_context_shown()) {
+        recompui::handle_menu_input(pressed);
+    }
 
     // Apply the user-configured deadzone (stored as an integer percentage).
     float deadzone = recomp::dc_joystick_deadzone / 100.0f;

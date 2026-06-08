@@ -326,6 +326,10 @@ void PVRContext::update_screen() {
         render_framebuffer_to_screen();
         pvr_scene_finish();
     }
+
+    // Draw the menu overlay (if any) on top of the presented frame.
+    recompui::render_menu_overlay();
+
     frame_index_++;
 }
 
