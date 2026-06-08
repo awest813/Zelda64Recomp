@@ -63,7 +63,7 @@
 | Feature | Status | Remains |
 |---------|--------|---------|
 | PVR render context (`dc_render_context.cpp`) | ✅ | — |
-| F3DZEX2 GBI high-level emulator (`dc_gbi.cpp`, ~2100 LOC) | 🟡 | Unregistered opcodes silently no-op; full MM coverage unverified |
+| F3DZEX2 GBI high-level emulator (`dc_gbi.cpp`, ~2100 LOC) | 🟡 | Unregistered opcodes now logged once via `dl_unimplemented` (no longer silent); full MM coverage unverified |
 | PVR triangle submission (`dc_pvr_renderer.cpp`) | ✅ | — |
 | TMEM staging + VRAM texture cache | ✅ | 3 MB VRAM budget; may need tuning under load |
 | Texture formats (RGBA16/32, IA4/8/16, CI4/CI8, I4/I8) | ✅ | — |
@@ -178,7 +178,7 @@ Ordered by dependency. Items marked **blocker** must be resolved before the port
 | # | Item | Priority | Notes |
 |---|------|----------|-------|
 | 1 | **End-to-end hardware boot test** | Blocker | Build disc, boot on DC, reach title screen |
-| 2 | **In-game rendering correctness** | Blocker | Fix GBI gaps found during play (silent no-ops today) |
+| 2 | **In-game rendering correctness** | Blocker | Fix GBI gaps found during play (unimplemented opcodes now logged once on stderr) |
 | 3 | **Performance / RAM** | Blocker | Profile on SH-4; optimize hot paths, texture budget, frame pacing |
 | 4 | **Playthrough validation** | Blocker | Title → Clock Town → dungeons → major scenes without crash/hang |
 | 5 | **VMU save/load in real play** | High | Verify autosave + manual save across power cycle |
