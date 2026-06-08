@@ -80,7 +80,122 @@ uint32_t texture_height(const LoadedTexture& tex, const TileState& tile) {
     return tex.size_bytes / width;
 }
 
+TexelColor decode_rgba16(uint16_t col16) {
+    TexelColor out{};
+    out.a = (col16 & 1) ? 255 : 0;
+    out.r = scale_5_8(static_cast<uint8_t>(col16 >> 11));
+    out.g = scale_5_8(static_cast<uint8_t>((col16 >> 6) & 0x1F));
+    out.b = scale_5_8(static_cast<uint8_t>((col16 >> 1) & 0x1F));
+    return out;
+}
+
+size_t texel_offset(const TileState& tile, uint32_t width, int x, int y) {
+    switch (tile.siz) {
+    case G_IM_SIZ_4b:
+        return static_cast<size_t>(y) * width + static_cast<size_t>(x) / 2u;
+    case G_IM_SIZ_8b:
+        return static_cast<size_t>(y) * width + static_cast<size_t>(x);
+    case G_IM_SIZ_16b:
+        return static_cast<size_t>(y) * width * 2u + static_cast<size_t>(x) * 2u;
+    case G_IM_SIZ_32b:
+        return static_cast<size_t>(y) * width * 4u + static_cast<size_t>(x) * 4u;
+    default:
+        return static_cast<size_t>(y) * width + static_cast<size_t>(x);
+    }
+}
+
 } // anonymous namespace
+
+TexelColor sample_texel(
+    const LoadedTexture& tex,
+    const TileState& tile,
+    const uint8_t* palette,
+    int x,
+    int y) {
+
+    TexelColor out{255, 255, 255, 255};
+    if (tex.addr == nullptr || tex.size_bytes == 0) {
+        return out;
+    }
+
+    uint32_t width = std::max(texture_width(tex, tile), 1u);
+    uint32_t height = std::max(texture_height(tex, tile), 1u);
+    const uint32_t tile_w = std::max<uint32_t>((tile.lrs - tile.uls + 4) / 4, 1);
+    const uint32_t tile_h = std::max<uint32_t>((tile.lrt - tile.ult + 4) / 4, 1);
+    if (tile.lrs >= tile.uls && tile.lrt >= tile.ult) {
+        width = std::min(width, tile_w);
+        height = std::min(height, tile_h);
+    }
+
+    if (x < 0 || y < 0 || static_cast<uint32_t>(x) >= width || static_cast<uint32_t>(y) >= height) {
+        return TexelColor{0, 0, 0, 0};
+    }
+
+    const size_t offset = texel_offset(tile, width, x, y);
+    if (offset >= tex.size_bytes) {
+        return out;
+    }
+
+    switch (tile.fmt) {
+    case G_IM_FMT_RGBA:
+        if (tile.siz == G_IM_SIZ_16b) {
+            if (offset + 1 < tex.size_bytes) {
+                return decode_rgba16(read_be16(tex.addr + offset));
+            }
+        } else if (tile.siz == G_IM_SIZ_32b) {
+            if (offset + 3 < tex.size_bytes) {
+                out.r = tex.addr[offset + 0];
+                out.g = tex.addr[offset + 1];
+                out.b = tex.addr[offset + 2];
+                out.a = tex.addr[offset + 3];
+            }
+        }
+        break;
+    case G_IM_FMT_IA:
+        if (tile.siz == G_IM_SIZ_4b) {
+            const uint8_t byte = tex.addr[offset];
+            const uint8_t part = (byte >> (4 - (x % 2) * 4)) & 0xF;
+            const uint8_t intensity = scale_3_8(static_cast<uint8_t>(part >> 1));
+            out.r = out.g = out.b = intensity;
+            out.a = (part & 1) ? 255 : 0;
+        } else if (tile.siz == G_IM_SIZ_8b) {
+            out.r = out.g = out.b = scale_4_8(static_cast<uint8_t>(tex.addr[offset] >> 4));
+            out.a = scale_4_8(static_cast<uint8_t>(tex.addr[offset] & 0xF));
+        } else if (tile.siz == G_IM_SIZ_16b && offset + 1 < tex.size_bytes) {
+            out.r = out.g = out.b = tex.addr[offset];
+            out.a = tex.addr[offset + 1];
+        }
+        break;
+    case G_IM_FMT_I:
+        if (tile.siz == G_IM_SIZ_4b) {
+            const uint8_t byte = tex.addr[offset];
+            const uint8_t part = (byte >> (4 - (x % 2) * 4)) & 0xF;
+            out.r = out.g = out.b = scale_4_8(part);
+            out.a = 255;
+        } else if (tile.siz == G_IM_SIZ_8b) {
+            out.r = out.g = out.b = tex.addr[offset];
+            out.a = 255;
+        }
+        break;
+    case G_IM_FMT_CI:
+        if (palette == nullptr) {
+            break;
+        }
+        if (tile.siz == G_IM_SIZ_4b) {
+            const uint8_t byte = tex.addr[offset];
+            const uint8_t idx = (byte >> (4 - (x % 2) * 4)) & 0xF;
+            return decode_rgba16(read_be16(palette + idx * 2));
+        }
+        if (tile.siz == G_IM_SIZ_8b) {
+            return decode_rgba16(read_be16(palette + tex.addr[offset] * 2));
+        }
+        break;
+    default:
+        break;
+    }
+
+    return out;
+}
 
 Cache::Cache() = default;
 

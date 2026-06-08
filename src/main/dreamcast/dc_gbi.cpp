@@ -179,6 +179,11 @@ constexpr uint32_t G_EX_ORIGIN_RIGHT = 0x400;
 
 constexpr uint8_t G_S2DEX_BG_RECT_COPY = 0x0A;
 
+constexpr uint16_t G_MWO_POINT_RGBA = 0x10;
+constexpr uint16_t G_MWO_POINT_ST = 0x14;
+constexpr uint16_t G_MWO_POINT_XYSCREEN = 0x18;
+constexpr uint16_t G_MWO_POINT_ZSCREEN = 0x1C;
+
 struct DisplayList {
     uint32_t w0;
     uint32_t w1;
@@ -637,15 +642,110 @@ struct GbiState {
         return combiner::uses_texel0(combine_mode);
     }
 
-    uint32_t vertex_combine_factor(uint8_t vr, uint8_t vg, uint8_t vb, uint8_t va) const {
+    combiner::ColorSource to_combiner_color(const tex::TexelColor& texel) const {
+        return {texel.r, texel.g, texel.b, texel.a};
+    }
+
+    combiner::ColorSource sample_texel0(float raw_u, float raw_v) const {
+        if (!loaded_textures[0].valid) {
+            return {255, 255, 255, 255};
+        }
+
+        tex::LoadedTexture tex{};
+        tex.addr = loaded_textures[0].addr;
+        tex.size_bytes = loaded_textures[0].size_bytes;
+
+        tex::TileState tile{};
+        tile.fmt = render_tile.fmt;
+        tile.siz = render_tile.siz;
+        tile.uls = render_tile.uls;
+        tile.ult = render_tile.ult;
+        tile.lrs = render_tile.lrs;
+        tile.lrt = render_tile.lrt;
+        tile.line_size_bytes = render_tile.line_size_bytes;
+
+        const int x = static_cast<int>((raw_u - render_tile.uls * 8.0f) / 32.0f);
+        const int y = static_cast<int>((raw_v - render_tile.ult * 8.0f) / 32.0f);
+        return to_combiner_color(tex::sample_texel(tex, tile, palette, x, y));
+    }
+
+    uint32_t vertex_combine_factor(
+        uint8_t vr, uint8_t vg, uint8_t vb, uint8_t va,
+        const combiner::ColorSource& texel0 = {255, 255, 255, 255},
+        const combiner::ColorSource& texel1 = {255, 255, 255, 255}) const {
         combiner::Inputs inputs{};
         inputs.shade = {vr, vg, vb, va};
         unpack_color(prim_color, inputs.prim.r, inputs.prim.g, inputs.prim.b, inputs.prim.a);
         unpack_color(env_color, inputs.env.r, inputs.env.g, inputs.env.b, inputs.env.a);
-        inputs.texel0 = {255, 255, 255, 255};
-        inputs.texel1 = {255, 255, 255, 255};
+        inputs.texel0 = texel0;
+        inputs.texel1 = texel1;
         const bool two_cycle = (other_mode_h & (1u << G_MDSFT_CYCLETYPE)) != 0;
         return combiner::evaluate(combine_mode, inputs, two_cycle);
+    }
+
+    bool vertex_in_view(const TransformedVertex& vert) const {
+        if (vert.w <= 0.0f) {
+            return false;
+        }
+        constexpr float margin = 64.0f;
+        const float max_x = fb_width() + margin;
+        const float max_y = 240.0f + margin;
+        return vert.screen_x >= -margin && vert.screen_x <= max_x
+            && vert.screen_y >= -margin && vert.screen_y <= max_y;
+    }
+
+    bool should_cull_dl(uint8_t vfirst, uint8_t vend) {
+        if (vfirst > vend || vend >= MAX_VERTICES) {
+            return false;
+        }
+        for (uint8_t i = vfirst; i <= vend; i++) {
+            if (!vtx_loaded[i]) {
+                transform_vertex(i);
+            }
+            if (vertex_in_view(xf_buffer[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void apply_modify_vtx(uint8_t index, uint8_t where, uint32_t value) {
+        if (index >= MAX_VERTICES) {
+            return;
+        }
+
+        N64Vertex& vtx = vtx_buffer[index];
+        TransformedVertex& xf = xf_buffer[index];
+
+        switch (where) {
+        case G_MWO_POINT_RGBA:
+            vtx.r = static_cast<uint8_t>((value >> 24) & 0xFF);
+            vtx.g = static_cast<uint8_t>((value >> 16) & 0xFF);
+            vtx.b = static_cast<uint8_t>((value >> 8) & 0xFF);
+            vtx.a = static_cast<uint8_t>(value & 0xFF);
+            xf.r = vtx.r;
+            xf.g = vtx.g;
+            xf.b = vtx.b;
+            xf.a = vtx.a;
+            break;
+        case G_MWO_POINT_ST:
+            vtx.s = static_cast<int16_t>(value >> 16);
+            vtx.t = static_cast<int16_t>(value & 0xFFFF);
+            xf.tex_u = static_cast<float>((static_cast<int32_t>(vtx.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
+            xf.tex_v = static_cast<float>((static_cast<int32_t>(vtx.t) * static_cast<int32_t>(texture_scale_t)) >> 16);
+            break;
+        case G_MWO_POINT_XYSCREEN:
+            xf.screen_x = static_cast<float>(static_cast<int16_t>(value >> 16)) / 4.0f;
+            xf.screen_y = static_cast<float>(static_cast<int16_t>(value & 0xFFFF)) / 4.0f;
+            break;
+        case G_MWO_POINT_ZSCREEN:
+            xf.screen_z = static_cast<float>(value >> 16);
+            xf.depth = std::clamp(1.0f - xf.screen_z / 32768.0f, 0.0f, 1.0f);
+            break;
+        default:
+            break;
+        }
+        vtx_loaded[index] = 1;
     }
 
     tex::Surface resolve_texture() {
@@ -832,9 +932,16 @@ struct GbiState {
             a0 = a1 = a2 = pa;
         }
 
-        uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0);
-        uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1);
-        uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2);
+        const bool use_texture = texture_on && loaded_textures[0].valid;
+        const bool combiner_needs_texel = use_texture && combine_mode != 0 && combine_uses_texel0();
+
+        const combiner::ColorSource tex0 = combiner_needs_texel ? sample_texel0(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex1 = combiner_needs_texel ? sample_texel0(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex2 = combiner_needs_texel ? sample_texel0(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+
+        uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0, tex0);
+        uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1, tex1);
+        uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2, tex2);
         if (geometry_mode & G_FOG) {
             c0 = apply_fog_blend(c0, v0.fog_alpha);
             c1 = apply_fog_blend(c1, v1.fog_alpha);
@@ -843,9 +950,7 @@ struct GbiState {
         const bool translucent = ((c0 | c1 | c2) & 0xFFu) < 255u;
         const bool z_enabled = zbuffer_enabled();
 
-        const bool use_texture = texture_on && loaded_textures[0].valid
-            && (combine_mode == 0 || combine_uses_texel0());
-        if (use_texture) {
+        if (use_texture && !combiner_needs_texel) {
             const tex::Surface surface = resolve_texture();
             float tu0, tv0, tu1, tv1, tu2, tv2;
             normalize_uv(v0.tex_u, v0.tex_v, tu0, tv0);
@@ -1099,6 +1204,20 @@ struct GbiState {
         const uint8_t count = static_cast<uint8_t>(dl->p0(12, 8));
         const uint8_t index = static_cast<uint8_t>(dl->p0(1, 7) - count);
         s.load_vertices(dl->w1, count, index);
+    }
+
+    static void dl_modifyvtx(GbiState& s, DisplayList*& dl) {
+        const uint8_t index = static_cast<uint8_t>(dl->p0(0, 16));
+        const uint8_t where = static_cast<uint8_t>(dl->p0(16, 8));
+        s.apply_modify_vtx(index, where, dl->w1);
+    }
+
+    static void dl_culldl(GbiState& s, DisplayList*& dl) {
+        const uint8_t vfirst = static_cast<uint8_t>(dl->p0(0, 16));
+        const uint8_t vlast = static_cast<uint8_t>(dl->p1(0, 16));
+        if (s.should_cull_dl(vfirst, vlast)) {
+            dl = nullptr;
+        }
     }
 
     static void dl_tri1(GbiState& s, DisplayList*& dl) {
@@ -1734,6 +1853,8 @@ struct GbiState {
 
         gbi_dispatch[G_NOOP] = dl_noop;
         gbi_dispatch[G_VTX] = dl_vtx;
+        gbi_dispatch[G_MODIFYVTX] = dl_modifyvtx;
+        gbi_dispatch[G_CULLDL] = dl_culldl;
         gbi_dispatch[G_TRI1] = dl_tri1;
         gbi_dispatch[G_TRI2] = dl_tri2;
         gbi_dispatch[G_QUAD] = dl_quad;
