@@ -82,20 +82,6 @@ uint32_t texture_height(const LoadedTexture& tex, const TileState& tile) {
 
 } // anonymous namespace
 
-struct Cache::Entry {
-    const uint8_t* addr = nullptr;
-    uint8_t fmt = 0;
-    uint8_t siz = 0;
-    uint32_t hash = 0;
-    pvr_ptr_t vram = 0;
-    uint16_t width = 0;
-    uint16_t height = 0;
-    uint16_t stride = 0;
-    uint32_t pvr_format = 0;
-    size_t bytes = 0;
-    uint32_t last_used = 0;
-};
-
 Cache::Cache() = default;
 
 Cache::~Cache() {
@@ -118,7 +104,11 @@ void Cache::flush() {
 }
 
 void Cache::evict_lru(size_t bytes_needed) {
-    while (vram_used_ + bytes_needed > VRAM_BUDGET && entry_count_ > 0) {
+    // Evict least-recently-used entries until the incoming texture fits within
+    // the VRAM budget AND there is a free entry slot. Without the slot check a
+    // full entry table would leave new uploads untracked, leaking their VRAM.
+    while ((vram_used_ + bytes_needed > VRAM_BUDGET || entry_count_ >= MAX_ENTRIES)
+           && entry_count_ > 0) {
         size_t victim = 0;
         for (size_t i = 1; i < entry_count_; i++) {
             if (entries_[i].last_used < entries_[victim].last_used) {
@@ -198,7 +188,7 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
         break;
     case G_IM_FMT_IA:
         if (tile.siz == G_IM_SIZ_4b) {
-            for (size_t i = 0; i < pixel_count; i++) {
+            for (size_t i = 0; i < pixel_count && (i / 2) < tex.size_bytes; i++) {
                 const uint8_t byte = tex.addr[i / 2];
                 const uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xF;
                 const uint8_t intensity = scale_3_8(static_cast<uint8_t>(part >> 1));
@@ -224,7 +214,7 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
         break;
     case G_IM_FMT_I:
         if (tile.siz == G_IM_SIZ_4b) {
-            for (size_t i = 0; i < pixel_count; i++) {
+            for (size_t i = 0; i < pixel_count && (i / 2) < tex.size_bytes; i++) {
                 const uint8_t byte = tex.addr[i / 2];
                 const uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xF;
                 const uint8_t intensity = scale_4_8(part);
@@ -244,7 +234,7 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
             return surface;
         }
         if (tile.siz == G_IM_SIZ_4b) {
-            for (size_t i = 0; i < pixel_count; i++) {
+            for (size_t i = 0; i < pixel_count && (i / 2) < tex.size_bytes; i++) {
                 const uint8_t byte = tex.addr[i / 2];
                 const uint8_t idx = (byte >> (4 - (i % 2) * 4)) & 0xF;
                 const uint16_t col16 = read_be16(palette + idx * 2);

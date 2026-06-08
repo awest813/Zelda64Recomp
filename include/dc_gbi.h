@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-struct OSTask;
+#include "ultramodern/ultra64.h" // OSTask (a union typedef, so it cannot be forward-declared)
 
 namespace dreamcast::pvr {
 class Renderer;

@@ -83,6 +83,7 @@ constexpr uint8_t G_MTX_PUSH = 0x01;
 constexpr uint8_t G_MTX_MODELVIEW = 0x00;
 
 constexpr uint32_t G_SHADE = 0x00000004;
+constexpr uint32_t G_LIGHTING = 0x00020000;
 constexpr uint32_t G_CULL_FRONT = 0x00000200;
 constexpr uint32_t G_CULL_BACK = 0x00000400;
 constexpr uint32_t G_CULL_BOTH = 0x00000600;
@@ -287,10 +288,17 @@ using dreamcast::math::mat4_identity;
 using dreamcast::math::mat4_mul;
 using dreamcast::math::mat4_transform;
 
+// The render/texture/combiner subsystems live under the dreamcast:: namespace;
+// alias them so the file-scope interpreter state can refer to them unqualified.
+namespace pvr = dreamcast::pvr;
+namespace tex = dreamcast::tex;
+namespace tmem = dreamcast::tmem;
+namespace combiner = dreamcast::combiner;
+
 // ── Interpreter state ───────────────────────────────────────────────
 
 struct TextureImage {
-    const uint8_t* addr = nullptr;
+    uint32_t offset = 0; // physical RDRAM byte offset of the source image
     uint8_t siz = G_IM_SIZ_16b;
     uint16_t width = 0;
 };
@@ -382,6 +390,7 @@ struct GbiState {
     std::array<LoadedTextureSlot, 2> loaded_textures{};
     uint8_t load_tile_slot = 0;
     const uint8_t* palette = nullptr;
+    std::array<uint8_t, 512> palette_buf{}; // de-swizzled TLUT (max 256 16-bit entries)
 
     uint16_t texture_scale_s = 0xFFFF;
     uint16_t texture_scale_t = 0xFFFF;
@@ -390,6 +399,19 @@ struct GbiState {
     bool force_branch = true;
     bool s2dex_active = false;
     uint8_t extended_opcode = 0;
+
+    // ── Vertex lighting (F3DEX2) ────────────────────────────────────
+    // raw_lights holds up to 7 directional lights followed by the ambient
+    // light (G_MV_LIGHT slots). num_dir_lights is the directional count from
+    // G_MW_NUMLIGHT; the ambient light is at raw_lights[num_dir_lights].
+    struct RawLight {
+        uint8_t col[3];
+        int8_t dir[3];
+    };
+    std::array<RawLight, 8> raw_lights{};
+    int num_dir_lights = 0;
+    bool lights_dirty = true;
+    float light_coeffs[8][3]{}; // directional light dirs transformed to object space
 
     std::vector<DisplayList*> dl_stack;
 
@@ -460,9 +482,82 @@ struct GbiState {
         return from_segmented(seg_addr) & 0x00FFFFF8;
     }
 
+    // RDRAM is stored as host-native 32-bit words (big-endian N64 words byte-
+    // swapped), so byte reads are XOR-3 swizzled. These helpers read logical
+    // (big-endian) values from a physical RDRAM byte offset.
+    uint8_t rdram_u8(uint32_t addr) const {
+        return rdram[addr ^ 3u];
+    }
+
+    uint16_t rdram_be16(uint32_t addr) const {
+        return static_cast<uint16_t>((rdram_u8(addr) << 8) | rdram_u8(addr + 1));
+    }
+
+    uint32_t rdram_be32(uint32_t addr) const {
+        return (static_cast<uint32_t>(rdram_u8(addr)) << 24)
+             | (static_cast<uint32_t>(rdram_u8(addr + 1)) << 16)
+             | (static_cast<uint32_t>(rdram_u8(addr + 2)) << 8)
+             | static_cast<uint32_t>(rdram_u8(addr + 3));
+    }
+
     void recompute_mvp() {
         mat4_mul(model_matrix, proj_matrix, mvp_matrix);
         mvp_dirty = false;
+        // Light coefficients depend on the modelview, so they go stale here.
+        lights_dirty = true;
+    }
+
+    // Transform each directional light's world-space direction into object
+    // space using the modelview's upper-left 3x3 (matching the F3DEX2 RSP /
+    // gfx_pc convention), then normalize. The dot of this with the object-space
+    // vertex normal gives the diffuse intensity.
+    void compute_light_coeffs() {
+        for (int i = 0; i < num_dir_lights; i++) {
+            const float lx = static_cast<float>(raw_lights[i].dir[0]) / 127.0f;
+            const float ly = static_cast<float>(raw_lights[i].dir[1]) / 127.0f;
+            const float lz = static_cast<float>(raw_lights[i].dir[2]) / 127.0f;
+            float cx = lx * model_matrix[0][0] + ly * model_matrix[0][1] + lz * model_matrix[0][2];
+            float cy = lx * model_matrix[1][0] + ly * model_matrix[1][1] + lz * model_matrix[1][2];
+            float cz = lx * model_matrix[2][0] + ly * model_matrix[2][1] + lz * model_matrix[2][2];
+            const float len = std::sqrt(cx * cx + cy * cy + cz * cz);
+            if (len > 1e-6f) {
+                const float inv = 1.0f / len;
+                cx *= inv; cy *= inv; cz *= inv;
+            }
+            light_coeffs[i][0] = cx;
+            light_coeffs[i][1] = cy;
+            light_coeffs[i][2] = cz;
+        }
+        lights_dirty = false;
+    }
+
+    void light_vertex(const N64Vertex& v, TransformedVertex& out) {
+        if (lights_dirty) {
+            compute_light_coeffs();
+        }
+        // Vertex normal bytes are signed; the RGB fields map to normal x/y/z.
+        const float nx = static_cast<float>(static_cast<int8_t>(v.r));
+        const float ny = static_cast<float>(static_cast<int8_t>(v.g));
+        const float nz = static_cast<float>(static_cast<int8_t>(v.b));
+
+        const RawLight& ambient = raw_lights[num_dir_lights];
+        float r = static_cast<float>(ambient.col[0]);
+        float g = static_cast<float>(ambient.col[1]);
+        float b = static_cast<float>(ambient.col[2]);
+
+        for (int i = 0; i < num_dir_lights; i++) {
+            float intensity = (nx * light_coeffs[i][0] + ny * light_coeffs[i][1] + nz * light_coeffs[i][2]) / 127.0f;
+            if (intensity > 0.0f) {
+                r += intensity * static_cast<float>(raw_lights[i].col[0]);
+                g += intensity * static_cast<float>(raw_lights[i].col[1]);
+                b += intensity * static_cast<float>(raw_lights[i].col[2]);
+            }
+        }
+
+        out.r = static_cast<uint8_t>(std::min(r, 255.0f));
+        out.g = static_cast<uint8_t>(std::min(g, 255.0f));
+        out.b = static_cast<uint8_t>(std::min(b, 255.0f));
+        out.a = v.a; // vertex alpha is preserved under lighting
     }
 
     void transform_vertex(uint32_t index) {
@@ -491,10 +586,14 @@ struct GbiState {
         out.depth = std::clamp((ndc_z + 1.0f) * 0.5f, 0.0f, 1.0f);
         out.tex_u = static_cast<float>((static_cast<int32_t>(v.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
         out.tex_v = static_cast<float>((static_cast<int32_t>(v.t) * static_cast<int32_t>(texture_scale_t)) >> 16);
-        out.r = v.r;
-        out.g = v.g;
-        out.b = v.b;
-        out.a = v.a;
+        if (geometry_mode & G_LIGHTING) {
+            light_vertex(v, out);
+        } else {
+            out.r = v.r;
+            out.g = v.g;
+            out.b = v.b;
+            out.a = v.a;
+        }
         vtx_loaded[index] = 1;
     }
 
@@ -640,6 +739,8 @@ struct GbiState {
         uint8_t r1, g1, b1, a1;
         uint8_t r2, g2, b2, a2;
 
+        // When G_LIGHTING is active, transform_vertex has already replaced the
+        // per-vertex RGB (originally normals) with the computed shade color.
         if (use_shade) {
             r0 = v0.r; g0 = v0.g; b0 = v0.b; a0 = v0.a;
             r1 = v1.r; g1 = v1.g; b1 = v1.b; a1 = v1.a;
@@ -845,6 +946,9 @@ struct GbiState {
             s.segments[dl->p0(2, 4)] = dl->w1;
             break;
         case G_MW_NUMLIGHT:
+            // F3DEX2 encodes the directional light count as NUML(n) = n * 24.
+            s.num_dir_lights = std::clamp(static_cast<int>(dl->w1 / 24), 0, 7);
+            s.lights_dirty = true;
             break;
         case G_MW_FORCEMTX:
             s.mvp_dirty = (dl->w1 == 0);
@@ -854,10 +958,32 @@ struct GbiState {
         }
     }
 
+    static constexpr uint8_t G_MV_VIEWPORT = 8;
+    static constexpr uint8_t G_MV_LIGHT = 10;
+
     static void dl_movemem(GbiState& s, DisplayList*& dl) {
         const uint8_t index = static_cast<uint8_t>(dl->p0(0, 8));
-        if (index == 8) { // F3DEX2_G_MV_VIEWPORT
+        if (index == G_MV_VIEWPORT) {
             s.set_viewport(dl->w1);
+        } else if (index == G_MV_LIGHT) {
+            // Offset (bytes) is encoded as ofs/8 in bits 8-15. The light DMEM
+            // table is LOOKATX(0), LOOKATY(24), L0(48), L1(72)...; directional
+            // light n (and the trailing ambient) map to slot ofs/24 - 2.
+            const uint32_t ofs = dl->p0(8, 8) * 8u;
+            const int slot = static_cast<int>(ofs / 24u) - 2;
+            if (slot >= 0 && slot < static_cast<int>(s.raw_lights.size())) {
+                const uint32_t addr = s.from_segmented(dl->w1) & 0x00FFFFFF;
+                GbiState::RawLight& l = s.raw_lights[slot];
+                // Light_t: col[3] at bytes 0-2, dir[3] (signed) at bytes 8-10.
+                // RDRAM byte access is XOR-3 swizzled (big-endian word storage).
+                l.col[0] = s.rdram[(addr + 0u) ^ 3u];
+                l.col[1] = s.rdram[(addr + 1u) ^ 3u];
+                l.col[2] = s.rdram[(addr + 2u) ^ 3u];
+                l.dir[0] = static_cast<int8_t>(s.rdram[(addr + 8u) ^ 3u]);
+                l.dir[1] = static_cast<int8_t>(s.rdram[(addr + 9u) ^ 3u]);
+                l.dir[2] = static_cast<int8_t>(s.rdram[(addr + 10u) ^ 3u]);
+                s.lights_dirty = true;
+            }
         }
     }
 
@@ -1047,22 +1173,18 @@ struct GbiState {
 
     static void draw_s2dex_bg_copy(GbiState& s, uint32_t address) {
         const uint32_t phys = s.from_segmented_masked(address);
-        const uint8_t* bg = s.rdram + phys;
 
-        const uint16_t image_w = static_cast<uint16_t>((bg[2] << 8) | bg[3]);
-        const int16_t frame_x = static_cast<int16_t>((bg[4] << 8) | bg[5]);
-        const uint16_t frame_w = static_cast<uint16_t>((bg[6] << 8) | bg[7]);
-        const uint16_t image_h = static_cast<uint16_t>((bg[10] << 8) | bg[11]);
-        const int16_t frame_y = static_cast<int16_t>((bg[12] << 8) | bg[13]);
-        const uint16_t frame_h = static_cast<uint16_t>((bg[14] << 8) | bg[15]);
-        const uint32_t image_ptr = (static_cast<uint32_t>(bg[16]) << 24)
-            | (static_cast<uint32_t>(bg[17]) << 16)
-            | (static_cast<uint32_t>(bg[18]) << 8)
-            | static_cast<uint32_t>(bg[19]);
-        const uint8_t image_fmt = bg[22];
-        const uint8_t image_siz = bg[23];
+        const uint16_t image_w = s.rdram_be16(phys + 2);
+        const int16_t frame_x = static_cast<int16_t>(s.rdram_be16(phys + 4));
+        const uint16_t frame_w = s.rdram_be16(phys + 6);
+        const uint16_t image_h = s.rdram_be16(phys + 10);
+        const int16_t frame_y = static_cast<int16_t>(s.rdram_be16(phys + 12));
+        const uint16_t frame_h = s.rdram_be16(phys + 14);
+        const uint32_t image_ptr = s.rdram_be32(phys + 16);
+        const uint8_t image_fmt = s.rdram_u8(phys + 22);
+        const uint8_t image_siz = s.rdram_u8(phys + 23);
 
-        s.texture_to_load.addr = s.rdram + (image_ptr & 0x00FFFFFF);
+        s.texture_to_load.offset = image_ptr & 0x00FFFFFF;
         s.texture_to_load.siz = image_siz;
         s.texture_to_load.width = std::max<uint16_t>(image_w, 1);
 
@@ -1075,7 +1197,7 @@ struct GbiState {
         s.render_tile.line_size_bytes = static_cast<uint16_t>(image_w * (1u << image_siz));
 
         const uint32_t size_bytes = static_cast<uint32_t>(image_w) * image_h * (1u << std::min<uint32_t>(image_siz, 2u));
-        s.tmem.load_block(s.texture_to_load.addr, 0, size_bytes);
+        s.tmem.load_block(s.rdram, s.texture_to_load.offset, 0, size_bytes);
         s.loaded_textures[0].addr = s.tmem.data();
         s.loaded_textures[0].size_bytes = size_bytes;
         s.loaded_textures[0].valid = true;
@@ -1090,22 +1212,18 @@ struct GbiState {
 
     static void draw_s2dex_obj_rectangle(GbiState& s, uint32_t address) {
         const uint32_t phys = s.from_segmented_masked(address);
-        const uint8_t* sp = s.rdram + phys;
 
-        const int16_t objX = static_cast<int16_t>((sp[4] << 8) | sp[5]);
-        const uint16_t scaleW = static_cast<uint16_t>((sp[6] << 8) | sp[7]);
-        const int16_t objY = static_cast<int16_t>((sp[12] << 8) | sp[13]);
-        const uint16_t scaleH = static_cast<uint16_t>((sp[14] << 8) | sp[15]);
-        const uint16_t imageW = static_cast<uint16_t>((sp[2] << 8) | sp[3]);
-        const uint16_t imageH = static_cast<uint16_t>((sp[10] << 8) | sp[11]);
-        const uint32_t image_ptr = (static_cast<uint32_t>(sp[16]) << 24)
-            | (static_cast<uint32_t>(sp[17]) << 16)
-            | (static_cast<uint32_t>(sp[18]) << 8)
-            | static_cast<uint32_t>(sp[19]);
-        const uint8_t image_fmt = sp[22];
-        const uint8_t image_siz = sp[23];
+        const uint16_t imageW = s.rdram_be16(phys + 2);
+        const int16_t objX = static_cast<int16_t>(s.rdram_be16(phys + 4));
+        const uint16_t scaleW = s.rdram_be16(phys + 6);
+        const uint16_t imageH = s.rdram_be16(phys + 10);
+        const int16_t objY = static_cast<int16_t>(s.rdram_be16(phys + 12));
+        const uint16_t scaleH = s.rdram_be16(phys + 14);
+        const uint32_t image_ptr = s.rdram_be32(phys + 16);
+        const uint8_t image_fmt = s.rdram_u8(phys + 22);
+        const uint8_t image_siz = s.rdram_u8(phys + 23);
 
-        s.texture_to_load.addr = s.rdram + (image_ptr & 0x00FFFFFF);
+        s.texture_to_load.offset = image_ptr & 0x00FFFFFF;
         s.texture_to_load.siz = image_siz;
         s.texture_to_load.width = std::max<uint16_t>(imageW, 1);
         s.render_tile.fmt = image_fmt;
@@ -1117,7 +1235,7 @@ struct GbiState {
         s.render_tile.line_size_bytes = static_cast<uint16_t>(imageW * (1u << image_siz));
 
         const uint32_t size_bytes = static_cast<uint32_t>(imageW) * imageH * (1u << std::min<uint32_t>(image_siz, 2u));
-        s.tmem.load_block(s.texture_to_load.addr, 0, size_bytes);
+        s.tmem.load_block(s.rdram, s.texture_to_load.offset, 0, size_bytes);
         s.loaded_textures[0].addr = s.tmem.data();
         s.loaded_textures[0].size_bytes = size_bytes;
         s.loaded_textures[0].valid = true;
@@ -1149,7 +1267,7 @@ struct GbiState {
 
     static void dl_settimg(GbiState& s, DisplayList*& dl) {
         const uint32_t address = s.from_segmented(dl->w1);
-        s.texture_to_load.addr = s.rdram + (address & 0x00FFFFFF);
+        s.texture_to_load.offset = address & 0x00FFFFFF;
         s.texture_to_load.siz = static_cast<uint8_t>(dl->p0(19, 2));
         s.texture_to_load.width = static_cast<uint16_t>(dl->p0(0, 12) + 1);
     }
@@ -1205,7 +1323,7 @@ struct GbiState {
 
         const uint32_t size_bytes = (static_cast<uint32_t>(lrs) + 1u) << word_size_shift;
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
-        s.tmem.load_block(s.texture_to_load.addr, s.tmem_offset, size_bytes);
+        s.tmem.load_block(s.rdram, s.texture_to_load.offset, s.tmem_offset, size_bytes);
         s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
@@ -1247,7 +1365,7 @@ struct GbiState {
 
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
         const uint32_t src_stride = std::max<uint32_t>(s.texture_to_load.width, 1u) << word_size_shift;
-        s.tmem.load_tile(s.texture_to_load.addr, src_stride, s.tmem_offset, width_bytes, height_tiles);
+        s.tmem.load_tile(s.rdram, s.texture_to_load.offset, src_stride, s.tmem_offset, width_bytes, height_tiles);
         s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
@@ -1263,7 +1381,15 @@ struct GbiState {
     static void dl_loadtlut(GbiState& s, DisplayList*& dl) {
         const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
         if (tile == G_TX_LOADTILE && s.texture_to_load.siz == G_IM_SIZ_16b) {
-            s.palette = s.texture_to_load.addr;
+            // count is encoded as (entries-1) in w1 bits 14-23; each TLUT entry
+            // is a 16-bit color. De-swizzle into palette_buf so the cache reads
+            // logical big-endian palette colors.
+            const uint32_t entries = std::min<uint32_t>(dl->p1(14, 10) + 1u, 256u);
+            const uint32_t bytes = entries * 2u;
+            for (uint32_t j = 0; j < bytes; j++) {
+                s.palette_buf[j] = s.rdram[(s.texture_to_load.offset + j) ^ 3u];
+            }
+            s.palette = s.palette_buf.data();
         }
     }
 
@@ -1477,7 +1603,7 @@ struct GbiState {
         }
     }
 
-    static DlHandler gbi_dispatch[256];
+    static inline DlHandler gbi_dispatch[256]{};
 
     static void init_dispatch() {
         static bool initialized = false;
@@ -1537,7 +1663,7 @@ struct GbiState {
         gbi_dispatch[G_LOADTLUT] = dl_loadtlut;
     }
 
-    void run_display_list(GbiState& state, DisplayList* dl) {
+    static void run_display_list(GbiState& state, DisplayList* dl) {
         init_dispatch();
         state.dl_stack.clear();
 
@@ -1574,6 +1700,7 @@ struct GbiState {
             }
         }
     }
+}; // struct GbiState
 
 } // anonymous namespace
 
@@ -1612,6 +1739,15 @@ void Interpreter::reset() {
     s.geometry_mode = G_CULL_BACK;
     s.other_mode_h = 0x080CFF;
     s.force_branch = true;
+
+    // Default lights to full-bright white so geometry that enables G_LIGHTING
+    // before any light is uploaded renders visibly rather than black.
+    for (auto& light : s.raw_lights) {
+        light.col[0] = light.col[1] = light.col[2] = 255;
+        light.dir[0] = light.dir[1] = light.dir[2] = 0;
+    }
+    s.num_dir_lights = 0;
+    s.lights_dirty = true;
 }
 
 void Interpreter::set_renderer(pvr::Renderer* renderer) {
@@ -1644,7 +1780,7 @@ void Interpreter::process_display_list(uint8_t* rdram, const OSTask* task) {
     }
 
     DisplayList* dl = reinterpret_cast<DisplayList*>(rdram + dl_addr);
-    run_display_list(impl_->state, dl);
+    GbiState::run_display_list(impl_->state, dl);
 }
 
 } // namespace dreamcast::gbi

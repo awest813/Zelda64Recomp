@@ -9,12 +9,13 @@
 // N64 controller mapping:
 //   DC A     → N64 A
 //   DC B     → N64 B
-//   DC X     → N64 C-Down (item 2)
-//   DC Y     → N64 C-Left (item 1)
+//   DC X     → N64 C-Down (item)
+//   DC Y     → N64 C-Left (item)
 //   DC Start → N64 Start
 //   DC L     → N64 Z (target)
 //   DC R     → N64 R (shield)
-//   DC D-pad → N64 D-pad
+//   DC D-pad → N64 C-buttons (Up/Down/Left/Right) — camera and the third item
+//              slot; the N64 D-pad is unused in normal MM gameplay.
 //   DC Stick → N64 Analog stick
 
 #ifdef DREAMCAST
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cmath>
+#include <algorithm>
 #include <atomic>
 #include <span>
 
@@ -59,6 +61,9 @@ struct DCControllerState {
 
 static DCControllerState dc_controller{};
 static std::atomic<bool> rumble_requested{false};
+// Previous frame's raw button mask, for edge detection (menu navigation needs
+// freshly-pressed buttons, not held state).
+static uint32_t prev_buttons = 0;
 
 // Dreamcast button bitmasks (active LOW in hardware, KOS inverts for us)
 // KOS cont_state_t uses CONT_* defines
@@ -88,20 +93,27 @@ constexpr uint16_t N64_BTN_CD      = 0x0004;
 constexpr uint16_t N64_BTN_CL      = 0x0002;
 constexpr uint16_t N64_BTN_CR      = 0x0001;
 
-// Convert DC joystick raw value (-128..127) to float (-1.0..1.0)
-// deadzone is a fraction in [0.0, 1.0]; values within the deadzone return 0.
-float normalize_stick(int raw, float deadzone) {
-    float val = static_cast<float>(raw) / 128.0f;
-    if (val > 1.0f) val = 1.0f;
-    if (val < -1.0f) val = -1.0f;
+// Apply a radial deadzone to the raw DC stick axes (each -128..127, with the
+// caller pre-negating Y for the N64 up=positive convention) and return a
+// normalized vector in the unit disk. A radial deadzone — rather than the
+// previous per-axis one — keeps diagonals smooth and stops the stick from
+// snapping to the cardinal axes near the center.
+void normalize_stick_radial(int raw_x, int raw_y, float deadzone, float& out_x, float& out_y) {
+    float rx = std::clamp(static_cast<float>(raw_x) / 128.0f, -1.0f, 1.0f);
+    float ry = std::clamp(static_cast<float>(raw_y) / 128.0f, -1.0f, 1.0f);
 
-    // Apply deadzone
-    if (std::fabs(val) < deadzone) {
-        return 0.0f;
+    const float mag = std::sqrt(rx * rx + ry * ry);
+    if (mag <= deadzone || mag <= 1e-6f) {
+        out_x = 0.0f;
+        out_y = 0.0f;
+        return;
     }
-    // Rescale outside deadzone so the usable range spans 0..1
-    float sign = (val > 0.0f) ? 1.0f : -1.0f;
-    return sign * (std::fabs(val) - deadzone) / (1.0f - deadzone);
+
+    // Rescale the magnitude so the live range (deadzone..1) maps to 0..1, then
+    // re-clamp to the unit disk (a diagonal raw input can exceed magnitude 1).
+    const float scaled = std::min((mag - deadzone) / (1.0f - deadzone), 1.0f);
+    out_x = rx / mag * scaled;
+    out_y = ry / mag * scaled;
 }
 
 // Map DC buttons to N64 buttons
@@ -113,15 +125,19 @@ uint16_t map_buttons(uint32_t dc_buttons, float trigger_l, float trigger_r) {
     if (dc_buttons & DC_BTN_B)     n64 |= N64_BTN_B;
     if (dc_buttons & DC_BTN_START) n64 |= N64_BTN_START;
 
-    // X → C-Down, Y → C-Left (most common item buttons in MM)
+    // X → C-Down, Y → C-Left: the two most-used item buttons on the face,
+    // for convenience.
     if (dc_buttons & DC_BTN_X)     n64 |= N64_BTN_CD;
     if (dc_buttons & DC_BTN_Y)     n64 |= N64_BTN_CL;
 
-    // D-pad
-    if (dc_buttons & DC_BTN_DPAD_UP)    n64 |= N64_BTN_DU;
-    if (dc_buttons & DC_BTN_DPAD_DOWN)  n64 |= N64_BTN_DD;
-    if (dc_buttons & DC_BTN_DPAD_LEFT)  n64 |= N64_BTN_DL;
-    if (dc_buttons & DC_BTN_DPAD_RIGHT) n64 |= N64_BTN_DR;
+    // The D-pad drives the full N64 C-button cluster (camera + the third item
+    // slot). Without this, C-Up and C-Right would be unreachable, since the
+    // Dreamcast pad has no second stick. The N64 D-pad is unused in normal
+    // Majora's Mask gameplay, so nothing is lost by repurposing it here.
+    if (dc_buttons & DC_BTN_DPAD_UP)    n64 |= N64_BTN_CU;
+    if (dc_buttons & DC_BTN_DPAD_DOWN)  n64 |= N64_BTN_CD;
+    if (dc_buttons & DC_BTN_DPAD_LEFT)  n64 |= N64_BTN_CL;
+    if (dc_buttons & DC_BTN_DPAD_RIGHT) n64 |= N64_BTN_CR;
 
     // Analog triggers: L → N64 Z (targeting), R → N64 R (shield)
     if (trigger_l > 0.5f) n64 |= N64_BTN_Z;
@@ -131,6 +147,13 @@ uint16_t map_buttons(uint32_t dc_buttons, float trigger_l, float trigger_r) {
 }
 
 } // anonymous namespace
+
+namespace recomp {
+// Defined here, ahead of dreamcast::maple_poll() which reads them. The getters
+// and setters that expose these to the config system live further down.
+static int dc_rumble_strength  = 100; // 0-100
+static int dc_joystick_deadzone = 15; // percent
+} // namespace recomp
 
 namespace dreamcast {
 
@@ -150,10 +173,18 @@ void maple_poll() {
     dc_controller.connected = true;
     dc_controller.buttons = state->buttons;
 
+    // Route freshly-pressed buttons to the menu overlay while it is visible.
+    // Edge detection prevents a held D-pad from racing through entries.
+    const uint32_t pressed = state->buttons & ~prev_buttons;
+    prev_buttons = state->buttons;
+    if (recompui::is_any_context_shown()) {
+        recompui::handle_menu_input(pressed);
+    }
+
     // Apply the user-configured deadzone (stored as an integer percentage).
-    float deadzone = recomp::dc_joystick_deadzone / 100.0f;
-    dc_controller.joy_x = normalize_stick(state->joyx, deadzone);
-    dc_controller.joy_y = normalize_stick(-state->joyy, deadzone); // Invert Y for N64 convention
+    // Y is negated so pushing up yields a positive N64 value.
+    const float deadzone = std::clamp(recomp::dc_joystick_deadzone / 100.0f, 0.0f, 0.95f);
+    normalize_stick_radial(state->joyx, -state->joyy, deadzone, dc_controller.joy_x, dc_controller.joy_y);
     dc_controller.trigger_l = static_cast<float>(state->ltrig) / 255.0f;
     dc_controller.trigger_r = static_cast<float>(state->rtrig) / 255.0f;
 
@@ -249,12 +280,15 @@ void handle_events() {
 }
 
 ultramodern::input::connected_device_info_t get_connected_device_info(int controller_num) {
-    ultramodern::input::connected_device_info_t info{};
+    using ultramodern::input::Device;
+    using ultramodern::input::Pak;
+
+    ultramodern::input::connected_device_info_t info{Device::None, Pak::None};
     if (controller_num == 0 && dc_controller.connected) {
-        info.is_connected = true;
-        // Dreamcast controller has analog stick and rumble
-        info.analog_stick_count = 1;
-        info.has_rumble = true;
+        info.connected_device = Device::Controller;
+        // Report a Rumble Pak only when a puru-puru pack is actually attached.
+        maple_device_t* puru = maple_enum_type(0, MAPLE_FUNC_PURUPURU);
+        info.connected_pak = (puru != nullptr) ? Pak::RumblePak : Pak::None;
     }
     return info;
 }
@@ -300,7 +334,8 @@ void get_right_analog(float* x, float* y) {
 
 // ── Rumble strength ─────────────────────────────────────────────────
 // Puru-puru rumble is either on or off; expose as 0–100 scale.
-static int dc_rumble_strength = 100;
+// (dc_rumble_strength is defined near the top of this file so maple_poll can
+//  read it.)
 
 int get_rumble_strength() {
     return dc_rumble_strength;
@@ -313,7 +348,7 @@ void set_rumble_strength(int strength) {
 // ── Sensitivity / deadzone stubs (no keyboard/mouse on Dreamcast) ───
 static int dc_gyro_sensitivity    = 50;
 static int dc_mouse_sensitivity   = 50;
-static int dc_joystick_deadzone   = 15; // percent
+// dc_joystick_deadzone is defined near the top of this file (read by maple_poll).
 
 int  get_gyro_sensitivity()   { return dc_gyro_sensitivity; }
 void set_gyro_sensitivity(int v) { dc_gyro_sensitivity = v; }

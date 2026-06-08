@@ -40,10 +40,14 @@ void mat4_mul(const float a[4][4], const float b[4][4], float out[4][4]) {
 }
 
 void mat4_transform(const float m[4][4], float x, float y, float z, float& ox, float& oy, float& oz, float& ow) {
-    ox = m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3];
-    oy = m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3];
-    oz = m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3];
-    ow = m[3][0] * x + m[3][1] * y + m[3][2] * z + m[3][3];
+    // N64 matrices use the row-vector convention (result = v * M), with
+    // translation in the last row (m[3][*]), matching guTranslateF and the
+    // model*proj composition done by mat4_mul. Multiply the homogeneous row
+    // vector (x, y, z, 1) on the left of M.
+    ox = x * m[0][0] + y * m[1][0] + z * m[2][0] + m[3][0];
+    oy = x * m[0][1] + y * m[1][1] + z * m[2][1] + m[3][1];
+    oz = x * m[0][2] + y * m[1][2] + z * m[2][2] + m[3][2];
+    ow = x * m[0][3] + y * m[1][3] + z * m[2][3] + m[3][3];
 }
 
 } // namespace dreamcast::math
