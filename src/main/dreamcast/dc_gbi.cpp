@@ -291,7 +291,7 @@ using dreamcast::math::mat4_transform;
 // ── Interpreter state ───────────────────────────────────────────────
 
 struct TextureImage {
-    const uint8_t* addr = nullptr;
+    uint32_t offset = 0; // physical RDRAM byte offset of the source image
     uint8_t siz = G_IM_SIZ_16b;
     uint16_t width = 0;
 };
@@ -383,6 +383,7 @@ struct GbiState {
     std::array<LoadedTextureSlot, 2> loaded_textures{};
     uint8_t load_tile_slot = 0;
     const uint8_t* palette = nullptr;
+    std::array<uint8_t, 512> palette_buf{}; // de-swizzled TLUT (max 256 16-bit entries)
 
     uint16_t texture_scale_s = 0xFFFF;
     uint16_t texture_scale_t = 0xFFFF;
@@ -472,6 +473,24 @@ struct GbiState {
 
     uint32_t from_segmented_masked(uint32_t seg_addr) const {
         return from_segmented(seg_addr) & 0x00FFFFF8;
+    }
+
+    // RDRAM is stored as host-native 32-bit words (big-endian N64 words byte-
+    // swapped), so byte reads are XOR-3 swizzled. These helpers read logical
+    // (big-endian) values from a physical RDRAM byte offset.
+    uint8_t rdram_u8(uint32_t addr) const {
+        return rdram[addr ^ 3u];
+    }
+
+    uint16_t rdram_be16(uint32_t addr) const {
+        return static_cast<uint16_t>((rdram_u8(addr) << 8) | rdram_u8(addr + 1));
+    }
+
+    uint32_t rdram_be32(uint32_t addr) const {
+        return (static_cast<uint32_t>(rdram_u8(addr)) << 24)
+             | (static_cast<uint32_t>(rdram_u8(addr + 1)) << 16)
+             | (static_cast<uint32_t>(rdram_u8(addr + 2)) << 8)
+             | static_cast<uint32_t>(rdram_u8(addr + 3));
     }
 
     void recompute_mvp() {
@@ -1147,22 +1166,18 @@ struct GbiState {
 
     static void draw_s2dex_bg_copy(GbiState& s, uint32_t address) {
         const uint32_t phys = s.from_segmented_masked(address);
-        const uint8_t* bg = s.rdram + phys;
 
-        const uint16_t image_w = static_cast<uint16_t>((bg[2] << 8) | bg[3]);
-        const int16_t frame_x = static_cast<int16_t>((bg[4] << 8) | bg[5]);
-        const uint16_t frame_w = static_cast<uint16_t>((bg[6] << 8) | bg[7]);
-        const uint16_t image_h = static_cast<uint16_t>((bg[10] << 8) | bg[11]);
-        const int16_t frame_y = static_cast<int16_t>((bg[12] << 8) | bg[13]);
-        const uint16_t frame_h = static_cast<uint16_t>((bg[14] << 8) | bg[15]);
-        const uint32_t image_ptr = (static_cast<uint32_t>(bg[16]) << 24)
-            | (static_cast<uint32_t>(bg[17]) << 16)
-            | (static_cast<uint32_t>(bg[18]) << 8)
-            | static_cast<uint32_t>(bg[19]);
-        const uint8_t image_fmt = bg[22];
-        const uint8_t image_siz = bg[23];
+        const uint16_t image_w = s.rdram_be16(phys + 2);
+        const int16_t frame_x = static_cast<int16_t>(s.rdram_be16(phys + 4));
+        const uint16_t frame_w = s.rdram_be16(phys + 6);
+        const uint16_t image_h = s.rdram_be16(phys + 10);
+        const int16_t frame_y = static_cast<int16_t>(s.rdram_be16(phys + 12));
+        const uint16_t frame_h = s.rdram_be16(phys + 14);
+        const uint32_t image_ptr = s.rdram_be32(phys + 16);
+        const uint8_t image_fmt = s.rdram_u8(phys + 22);
+        const uint8_t image_siz = s.rdram_u8(phys + 23);
 
-        s.texture_to_load.addr = s.rdram + (image_ptr & 0x00FFFFFF);
+        s.texture_to_load.offset = image_ptr & 0x00FFFFFF;
         s.texture_to_load.siz = image_siz;
         s.texture_to_load.width = std::max<uint16_t>(image_w, 1);
 
@@ -1175,7 +1190,7 @@ struct GbiState {
         s.render_tile.line_size_bytes = static_cast<uint16_t>(image_w * (1u << image_siz));
 
         const uint32_t size_bytes = static_cast<uint32_t>(image_w) * image_h * (1u << std::min<uint32_t>(image_siz, 2u));
-        s.tmem.load_block(s.texture_to_load.addr, 0, size_bytes);
+        s.tmem.load_block(s.rdram, s.texture_to_load.offset, 0, size_bytes);
         s.loaded_textures[0].addr = s.tmem.data();
         s.loaded_textures[0].size_bytes = size_bytes;
         s.loaded_textures[0].valid = true;
@@ -1190,22 +1205,18 @@ struct GbiState {
 
     static void draw_s2dex_obj_rectangle(GbiState& s, uint32_t address) {
         const uint32_t phys = s.from_segmented_masked(address);
-        const uint8_t* sp = s.rdram + phys;
 
-        const int16_t objX = static_cast<int16_t>((sp[4] << 8) | sp[5]);
-        const uint16_t scaleW = static_cast<uint16_t>((sp[6] << 8) | sp[7]);
-        const int16_t objY = static_cast<int16_t>((sp[12] << 8) | sp[13]);
-        const uint16_t scaleH = static_cast<uint16_t>((sp[14] << 8) | sp[15]);
-        const uint16_t imageW = static_cast<uint16_t>((sp[2] << 8) | sp[3]);
-        const uint16_t imageH = static_cast<uint16_t>((sp[10] << 8) | sp[11]);
-        const uint32_t image_ptr = (static_cast<uint32_t>(sp[16]) << 24)
-            | (static_cast<uint32_t>(sp[17]) << 16)
-            | (static_cast<uint32_t>(sp[18]) << 8)
-            | static_cast<uint32_t>(sp[19]);
-        const uint8_t image_fmt = sp[22];
-        const uint8_t image_siz = sp[23];
+        const uint16_t imageW = s.rdram_be16(phys + 2);
+        const int16_t objX = static_cast<int16_t>(s.rdram_be16(phys + 4));
+        const uint16_t scaleW = s.rdram_be16(phys + 6);
+        const uint16_t imageH = s.rdram_be16(phys + 10);
+        const int16_t objY = static_cast<int16_t>(s.rdram_be16(phys + 12));
+        const uint16_t scaleH = s.rdram_be16(phys + 14);
+        const uint32_t image_ptr = s.rdram_be32(phys + 16);
+        const uint8_t image_fmt = s.rdram_u8(phys + 22);
+        const uint8_t image_siz = s.rdram_u8(phys + 23);
 
-        s.texture_to_load.addr = s.rdram + (image_ptr & 0x00FFFFFF);
+        s.texture_to_load.offset = image_ptr & 0x00FFFFFF;
         s.texture_to_load.siz = image_siz;
         s.texture_to_load.width = std::max<uint16_t>(imageW, 1);
         s.render_tile.fmt = image_fmt;
@@ -1217,7 +1228,7 @@ struct GbiState {
         s.render_tile.line_size_bytes = static_cast<uint16_t>(imageW * (1u << image_siz));
 
         const uint32_t size_bytes = static_cast<uint32_t>(imageW) * imageH * (1u << std::min<uint32_t>(image_siz, 2u));
-        s.tmem.load_block(s.texture_to_load.addr, 0, size_bytes);
+        s.tmem.load_block(s.rdram, s.texture_to_load.offset, 0, size_bytes);
         s.loaded_textures[0].addr = s.tmem.data();
         s.loaded_textures[0].size_bytes = size_bytes;
         s.loaded_textures[0].valid = true;
@@ -1249,7 +1260,7 @@ struct GbiState {
 
     static void dl_settimg(GbiState& s, DisplayList*& dl) {
         const uint32_t address = s.from_segmented(dl->w1);
-        s.texture_to_load.addr = s.rdram + (address & 0x00FFFFFF);
+        s.texture_to_load.offset = address & 0x00FFFFFF;
         s.texture_to_load.siz = static_cast<uint8_t>(dl->p0(19, 2));
         s.texture_to_load.width = static_cast<uint16_t>(dl->p0(0, 12) + 1);
     }
@@ -1305,7 +1316,7 @@ struct GbiState {
 
         const uint32_t size_bytes = (static_cast<uint32_t>(lrs) + 1u) << word_size_shift;
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
-        s.tmem.load_block(s.texture_to_load.addr, s.tmem_offset, size_bytes);
+        s.tmem.load_block(s.rdram, s.texture_to_load.offset, s.tmem_offset, size_bytes);
         s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
@@ -1347,7 +1358,7 @@ struct GbiState {
 
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
         const uint32_t src_stride = std::max<uint32_t>(s.texture_to_load.width, 1u) << word_size_shift;
-        s.tmem.load_tile(s.texture_to_load.addr, src_stride, s.tmem_offset, width_bytes, height_tiles);
+        s.tmem.load_tile(s.rdram, s.texture_to_load.offset, src_stride, s.tmem_offset, width_bytes, height_tiles);
         s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
@@ -1363,7 +1374,15 @@ struct GbiState {
     static void dl_loadtlut(GbiState& s, DisplayList*& dl) {
         const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
         if (tile == G_TX_LOADTILE && s.texture_to_load.siz == G_IM_SIZ_16b) {
-            s.palette = s.texture_to_load.addr;
+            // count is encoded as (entries-1) in w1 bits 14-23; each TLUT entry
+            // is a 16-bit color. De-swizzle into palette_buf so the cache reads
+            // logical big-endian palette colors.
+            const uint32_t entries = std::min<uint32_t>(dl->p1(14, 10) + 1u, 256u);
+            const uint32_t bytes = entries * 2u;
+            for (uint32_t j = 0; j < bytes; j++) {
+                s.palette_buf[j] = s.rdram[(s.texture_to_load.offset + j) ^ 3u];
+            }
+            s.palette = s.palette_buf.data();
         }
     }
 
