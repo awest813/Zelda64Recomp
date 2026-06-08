@@ -9,6 +9,7 @@
 #include "dc_combiner.h"
 #include "dc_math.h"
 #include "dc_pvr_renderer.h"
+#include "dc_rdp_blend.h"
 #include "dc_texture_cache.h"
 #include "dc_tmem.h"
 
@@ -446,6 +447,10 @@ struct GbiState {
         return (geometry_mode & G_ZBUFFER) != 0;
     }
 
+    rdp::BlendState current_blend_state() const {
+        return rdp::decode_blend(other_mode_l, other_mode_h, zbuffer_enabled());
+    }
+
     static float compute_pvr_depth(float ndc_z) {
         // PVR DEPTHCMP_GEQUAL treats larger Z as nearer.
         return std::clamp((1.0f - ndc_z) * 0.5f, 0.0f, 1.0f);
@@ -654,10 +659,6 @@ struct GbiState {
         r = static_cast<uint8_t>((argb >> 16) & 0xFF);
         g = static_cast<uint8_t>((argb >> 8) & 0xFF);
         b = static_cast<uint8_t>(argb & 0xFF);
-    }
-
-    static bool argb_translucent(uint32_t c0, uint32_t c1, uint32_t c2) {
-        return ((c0 | c1 | c2) & 0xFF000000u) != 0xFF000000u;
     }
 
     bool combine_uses_texel0() const {
@@ -908,7 +909,7 @@ struct GbiState {
         unpack_color(color, r, g, b, a);
 
         if (renderer != nullptr) {
-            renderer->submit_fill_rect(ulx, uly, lrx, lry, pack_argb(r, g, b, a), zbuffer_enabled());
+            renderer->submit_fill_rect(ulx, uly, lrx, lry, pack_argb(r, g, b, a), current_blend_state(), zbuffer_enabled());
         }
     }
 
@@ -1002,7 +1003,7 @@ struct GbiState {
             c1 = apply_fog_blend(c1, v1.fog_alpha);
             c2 = apply_fog_blend(c2, v2.fog_alpha);
         }
-        const bool translucent = argb_translucent(c0, c1, c2);
+        const rdp::BlendState blend = current_blend_state();
         const bool z_enabled = zbuffer_enabled();
 
         if (use_texture && !combiner_needs_texel) {
@@ -1015,14 +1016,14 @@ struct GbiState {
                 v0.screen_x, v0.screen_y, v0.depth, tu0, tv0, c0,
                 v1.screen_x, v1.screen_y, v1.depth, tu1, tv1, c1,
                 v2.screen_x, v2.screen_y, v2.depth, tu2, tv2, c2,
-                surface, translucent, z_enabled
+                surface, blend, z_enabled
             );
         } else {
             renderer->submit_triangle(
                 v0.screen_x, v0.screen_y, v0.depth, c0,
                 v1.screen_x, v1.screen_y, v1.depth, c1,
                 v2.screen_x, v2.screen_y, v2.depth, c2,
-                translucent, z_enabled
+                blend, z_enabled
             );
         }
     }
@@ -1053,12 +1054,10 @@ struct GbiState {
         if (geometry_mode & G_FOG) {
             vtx_color = apply_fog_blend(vtx_color, compute_fog_alpha(0.0f));
         }
-        const bool translucent = (vtx_color & 0xFF000000u) != 0xFF000000u;
-
         renderer->submit_tex_rect(
             ulx, uly, lrx, lry,
             static_cast<float>(uls), static_cast<float>(ult), lrs, lrt,
-            surface, vtx_color, translucent, zbuffer_enabled());
+            surface, vtx_color, current_blend_state(), zbuffer_enabled());
     }
 
     void draw_tri(uint8_t a, uint8_t b, uint8_t c) {

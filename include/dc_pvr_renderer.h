@@ -7,6 +7,7 @@
 
 #include <dc/pvr.h>
 
+#include "dc_rdp_blend.h"
 #include "dc_zbuffer.h"
 
 namespace dreamcast::tex {
@@ -39,7 +40,7 @@ public:
         float x0, float y0, float z0, uint32_t argb0,
         float x1, float y1, float z1, uint32_t argb1,
         float x2, float y2, float z2, uint32_t argb2,
-        bool translucent,
+        const rdp::BlendState& blend,
         bool zbuffer_enabled);
 
     void submit_textured_triangle(
@@ -47,17 +48,17 @@ public:
         float x1, float y1, float z1, float u1, float v1, uint32_t argb1,
         float x2, float y2, float z2, float u2, float v2, uint32_t argb2,
         const tex::Surface& texture,
-        bool translucent,
+        const rdp::BlendState& blend,
         bool zbuffer_enabled);
 
-    void submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint32_t argb, bool zbuffer_enabled);
+    void submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint32_t argb, const rdp::BlendState& blend, bool zbuffer_enabled);
 
     void submit_tex_rect(
         int32_t ulx, int32_t uly, int32_t lrx, int32_t lry,
         float uls, float ult, float lrs, float lrt,
         const tex::Surface& texture,
         uint32_t argb,
-        bool translucent,
+        const rdp::BlendState& blend,
         bool zbuffer_enabled);
 
     bool is_occluded(float n64_x, float n64_y, float depth) const;
@@ -79,6 +80,10 @@ private:
         bool translucent = false;
         bool gouraud = true;
         bool zbuffer_enabled = false;
+        bool depth_write = true;
+        bool blend_enable = false;
+        int blend_src = PVR_BLEND_ONE;
+        int blend_dst = PVR_BLEND_ZERO;
         pvr_ptr_t texture_vram = 0;
         uint32_t pvr_format = 0;
         uint16_t tex_stride = 0;
