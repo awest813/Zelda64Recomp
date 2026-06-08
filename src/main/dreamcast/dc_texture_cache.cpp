@@ -118,7 +118,11 @@ void Cache::flush() {
 }
 
 void Cache::evict_lru(size_t bytes_needed) {
-    while (vram_used_ + bytes_needed > VRAM_BUDGET && entry_count_ > 0) {
+    // Evict least-recently-used entries until the incoming texture fits within
+    // the VRAM budget AND there is a free entry slot. Without the slot check a
+    // full entry table would leave new uploads untracked, leaking their VRAM.
+    while ((vram_used_ + bytes_needed > VRAM_BUDGET || entry_count_ >= MAX_ENTRIES)
+           && entry_count_ > 0) {
         size_t victim = 0;
         for (size_t i = 1; i < entry_count_; i++) {
             if (entries_[i].last_used < entries_[victim].last_used) {

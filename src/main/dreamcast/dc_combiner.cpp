@@ -126,28 +126,35 @@ uint8_t eval_cycle_alpha(const Cycle& cycle, const Inputs& in, const ColorSource
 }
 
 void decode_cycles(uint64_t combine_mode, Cycle& rgb0, Cycle& alpha0, Cycle& rgb1, Cycle& alpha1) {
+    // combine_mode packs the two G_SETCOMBINE command words as (w1 << 32) | w0,
+    // so w0 is the first command word (opcode in bits 24-31) and w1 the second.
+    // Field positions follow the canonical gbi.h GCCc*w* macros.
     const uint32_t w0 = static_cast<uint32_t>(combine_mode & 0xFFFFFFFFu);
     const uint32_t w1 = static_cast<uint32_t>((combine_mode >> 32) & 0xFFFFFFFFu);
 
-    rgb0.a = static_cast<uint8_t>((w1 >> 12) & 0x0F);
-    rgb0.c = static_cast<uint8_t>((w1 >> 15) & 0x0F);
-    rgb0.b = static_cast<uint8_t>((w0 >> 28) & 0x0F);
-    rgb0.d = static_cast<uint8_t>((w1 >> 9) & 0x0F);
+    // Color cycle 0: a/c live in w0, b/d in w1. The color c mux is 5 bits.
+    rgb0.a = static_cast<uint8_t>((w0 >> 20) & 0x0F);
+    rgb0.c = static_cast<uint8_t>((w0 >> 15) & 0x1F);
+    rgb0.b = static_cast<uint8_t>((w1 >> 28) & 0x0F);
+    rgb0.d = static_cast<uint8_t>((w1 >> 15) & 0x07);
 
-    alpha0.a = static_cast<uint8_t>((w1 >> 18) & 0x0F);
-    alpha0.c = static_cast<uint8_t>((w1 >> 21) & 0x0F);
-    alpha0.b = static_cast<uint8_t>((w0 >> 12) & 0x0F);
-    alpha0.d = static_cast<uint8_t>((w1 >> 6) & 0x0F);
+    // Alpha cycle 0: a/c in w0, b/d in w1. All alpha muxes are 3 bits.
+    alpha0.a = static_cast<uint8_t>((w0 >> 12) & 0x07);
+    alpha0.c = static_cast<uint8_t>((w0 >> 9) & 0x07);
+    alpha0.b = static_cast<uint8_t>((w1 >> 12) & 0x07);
+    alpha0.d = static_cast<uint8_t>((w1 >> 9) & 0x07);
 
-    rgb1.a = static_cast<uint8_t>((w1 >> 0) & 0x0F);
-    rgb1.c = static_cast<uint8_t>((w1 >> 3) & 0x0F);
-    rgb1.b = static_cast<uint8_t>((w0 >> 24) & 0x0F);
-    rgb1.d = static_cast<uint8_t>((w0 >> 15) & 0x0F);
+    // Color cycle 1: a/c in w0, b/d in w1.
+    rgb1.a = static_cast<uint8_t>((w0 >> 5) & 0x0F);
+    rgb1.c = static_cast<uint8_t>((w0 >> 0) & 0x1F);
+    rgb1.b = static_cast<uint8_t>((w1 >> 24) & 0x0F);
+    rgb1.d = static_cast<uint8_t>((w1 >> 6) & 0x07);
 
-    alpha1.a = static_cast<uint8_t>((w0 >> 6) & 0x0F);
-    alpha1.c = static_cast<uint8_t>((w0 >> 9) & 0x0F);
-    alpha1.b = static_cast<uint8_t>((w0 >> 0) & 0x0F);
-    alpha1.d = static_cast<uint8_t>((w0 >> 3) & 0x0F);
+    // Alpha cycle 1: all four fields live in w1.
+    alpha1.a = static_cast<uint8_t>((w1 >> 21) & 0x07);
+    alpha1.c = static_cast<uint8_t>((w1 >> 18) & 0x07);
+    alpha1.b = static_cast<uint8_t>((w1 >> 3) & 0x07);
+    alpha1.d = static_cast<uint8_t>((w1 >> 0) & 0x07);
 }
 
 bool mux_uses_texture(uint32_t mux) {
