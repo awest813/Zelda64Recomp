@@ -132,6 +132,13 @@ uint16_t map_buttons(uint32_t dc_buttons, float trigger_l, float trigger_r) {
 
 } // anonymous namespace
 
+namespace recomp {
+// Defined here, ahead of dreamcast::maple_poll() which reads them. The getters
+// and setters that expose these to the config system live further down.
+static int dc_rumble_strength  = 100; // 0-100
+static int dc_joystick_deadzone = 15; // percent
+} // namespace recomp
+
 namespace dreamcast {
 
 void maple_poll() {
@@ -300,7 +307,8 @@ void get_right_analog(float* x, float* y) {
 
 // ── Rumble strength ─────────────────────────────────────────────────
 // Puru-puru rumble is either on or off; expose as 0–100 scale.
-static int dc_rumble_strength = 100;
+// (dc_rumble_strength is defined near the top of this file so maple_poll can
+//  read it.)
 
 int get_rumble_strength() {
     return dc_rumble_strength;
@@ -313,7 +321,7 @@ void set_rumble_strength(int strength) {
 // ── Sensitivity / deadzone stubs (no keyboard/mouse on Dreamcast) ───
 static int dc_gyro_sensitivity    = 50;
 static int dc_mouse_sensitivity   = 50;
-static int dc_joystick_deadzone   = 15; // percent
+// dc_joystick_deadzone is defined near the top of this file (read by maple_poll).
 
 int  get_gyro_sensitivity()   { return dc_gyro_sensitivity; }
 void set_gyro_sensitivity(int v) { dc_gyro_sensitivity = v; }
