@@ -82,8 +82,10 @@ private:
         bool zbuffer_enabled = false;
         bool depth_write = true;
         bool blend_enable = false;
+        bool punch_through = false;
         int blend_src = PVR_BLEND_ONE;
         int blend_dst = PVR_BLEND_ZERO;
+        int depth_compare = PVR_DEPTHCMP_GEQUAL;
         pvr_ptr_t texture_vram = 0;
         uint32_t pvr_format = 0;
         uint16_t tex_stride = 0;

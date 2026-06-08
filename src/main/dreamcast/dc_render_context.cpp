@@ -225,14 +225,13 @@ PVRContext::~PVRContext() {
 
 void PVRContext::init_pvr() {
     // Initialize PVR with basic parameters.
-    // Opaque and translucent polygon bins; no modifier volumes or punch-through
-    // to save VRAM and tile accelerator bandwidth.
+    // Opaque, translucent, and punch-through polygon bins for RDP alpha-test UI.
     pvr_init_params_t pvr_params = {
         { PVR_BINSIZE_16,  // Opaque polygons
           PVR_BINSIZE_0,   // Opaque modifier volumes (disabled)
           PVR_BINSIZE_16,  // Translucent polygons
           PVR_BINSIZE_0,   // Translucent modifier volumes (disabled)
-          PVR_BINSIZE_0 }, // Punch-through polygons (disabled)
+          PVR_BINSIZE_8 }, // Punch-through (G_AC_THRESHOLD)
         512 * 1024,        // Vertex buffer size (512 KB; rest of VRAM for textures/FB)
         0,                 // No DMA
         0,                 // No FSAA

@@ -448,7 +448,7 @@ struct GbiState {
     }
 
     rdp::BlendState current_blend_state() const {
-        return rdp::decode_blend(other_mode_l, other_mode_h, zbuffer_enabled());
+        return rdp::decode_blend(other_mode_l, other_mode_h, zbuffer_enabled(), blend_color);
     }
 
     static float compute_pvr_depth(float ndc_z) {
