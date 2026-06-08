@@ -41,6 +41,7 @@ bool Renderer::BatchKey::operator==(const BatchKey& other) const {
         && textured == other.textured
         && translucent == other.translucent
         && gouraud == other.gouraud
+        && zbuffer_enabled == other.zbuffer_enabled
         && texture_vram == other.texture_vram
         && pvr_format == other.pvr_format
         && tex_stride == other.tex_stride
@@ -75,6 +76,27 @@ void Renderer::set_framebuffer_size(uint16_t width, uint16_t height) {
     mapping_.fb_width = width;
     mapping_.fb_height = height;
     update_mapping();
+    update_zbuffer_size();
+}
+
+void Renderer::update_zbuffer_size() {
+    zbuffer_.set_size(mapping_.fb_width, mapping_.fb_height);
+}
+
+bool Renderer::is_occluded(float n64_x, float n64_y, float depth) const {
+    return zbuffer_.is_occluded(n64_x, n64_y, depth);
+}
+
+void Renderer::record_depth_triangle(
+    float x0, float y0, float z0,
+    float x1, float y1, float z1,
+    float x2, float y2, float z2,
+    bool zbuffer_enabled,
+    bool translucent) {
+    if (!zbuffer_enabled || translucent) {
+        return;
+    }
+    zbuffer_.rasterize_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2);
 }
 
 void Renderer::update_mapping() {
@@ -186,8 +208,13 @@ void Renderer::begin_batch(const BatchKey& key) {
 
     cxt.gen.shading = key.gouraud ? PVR_SHADE_GOURAUD : PVR_SHADE_FLAT;
     cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.depth.comparison = key.textured && !key.gouraud ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GEQUAL;
-    cxt.depth.write = key.translucent ? PVR_DEPTHWRITE_DISABLE : PVR_DEPTHWRITE_ENABLE;
+    if (!key.zbuffer_enabled) {
+        cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+        cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+    } else {
+        cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+        cxt.depth.write = key.translucent ? PVR_DEPTHWRITE_DISABLE : PVR_DEPTHWRITE_ENABLE;
+    }
     if (key.translucent) {
         cxt.blend.src = PVR_BLEND_SRCALPHA;
         cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
@@ -208,12 +235,13 @@ void Renderer::clear_screen() {
     key.list_type = PVR_LIST_OP_POLY;
     key.gouraud = false;
     key.translucent = false;
+    key.zbuffer_enabled = false;
     ensure_list(key.list_type);
     begin_batch(key);
     flush_batch();
 
     pvr_vertex_t vert{};
-    vert.z = 1.0f;
+    vert.z = 0.0f;
     vert.argb = 0xFF000000;
     vert.oargb = 0;
 
@@ -253,6 +281,8 @@ void Renderer::begin_frame() {
     batch_hdr_valid_ = false;
 
     update_mapping();
+    update_zbuffer_size();
+    zbuffer_.clear();
     clear_screen();
 }
 
@@ -273,7 +303,8 @@ void Renderer::submit_triangle(
     float x0, float y0, float z0, uint32_t argb0,
     float x1, float y1, float z1, uint32_t argb1,
     float x2, float y2, float z2, uint32_t argb2,
-    bool translucent) {
+    bool translucent,
+    bool zbuffer_enabled) {
 
     if (!scene_active_) {
         begin_frame();
@@ -286,6 +317,7 @@ void Renderer::submit_triangle(
     key.list_type = list_type;
     key.translucent = use_translucent;
     key.gouraud = true;
+    key.zbuffer_enabled = zbuffer_enabled;
     ensure_list(list_type);
     begin_batch(key);
 
@@ -312,6 +344,7 @@ void Renderer::submit_triangle(
     vert.argb = argb2;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2, zbuffer_enabled, use_translucent);
     drew_geometry_ = true;
 }
 
@@ -320,10 +353,11 @@ void Renderer::submit_textured_triangle(
     float x1, float y1, float z1, float u1, float v1, uint32_t argb1,
     float x2, float y2, float z2, float u2, float v2, uint32_t argb2,
     const tex::Surface& texture,
-    bool translucent) {
+    bool translucent,
+    bool zbuffer_enabled) {
 
     if (!texture.valid || texture.vram == 0) {
-        submit_triangle(x0, y0, z0, argb0, x1, y1, z1, argb1, x2, y2, z2, argb2, translucent);
+        submit_triangle(x0, y0, z0, argb0, x1, y1, z1, argb1, x2, y2, z2, argb2, translucent, zbuffer_enabled);
         return;
     }
 
@@ -345,6 +379,7 @@ void Renderer::submit_textured_triangle(
     key.tex_height = texture.height;
     key.cms = texture.cms;
     key.cmt = texture.cmt;
+    key.zbuffer_enabled = zbuffer_enabled;
     ensure_list(list_type);
     begin_batch(key);
 
@@ -377,10 +412,11 @@ void Renderer::submit_textured_triangle(
     vert.argb = argb2;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2, zbuffer_enabled, use_translucent);
     drew_geometry_ = true;
 }
 
-void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint32_t argb) {
+void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint32_t argb, bool zbuffer_enabled) {
     if (!scene_active_) {
         begin_frame();
     }
@@ -397,6 +433,7 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     key.list_type = list_type;
     key.translucent = translucent;
     key.gouraud = false;
+    key.zbuffer_enabled = zbuffer_enabled;
     ensure_list(list_type);
     begin_batch(key);
 
@@ -404,9 +441,10 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     const float my0 = map_y(y0);
     const float mx1 = map_x(x1);
     const float my1 = map_y(y1);
+    const float rect_depth = zbuffer_enabled ? 1.0f : 0.0f;
 
     pvr_vertex_t vert{};
-    vert.z = 0.5f;
+    vert.z = rect_depth;
     vert.argb = argb;
     vert.oargb = 0;
 
@@ -429,6 +467,8 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     vert.y = my1;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, rect_depth, x1, y0, rect_depth, x0, y1, rect_depth, zbuffer_enabled, translucent);
+    record_depth_triangle(x1, y0, rect_depth, x1, y1, rect_depth, x0, y1, rect_depth, zbuffer_enabled, translucent);
     drew_geometry_ = true;
 }
 
@@ -437,10 +477,11 @@ void Renderer::submit_tex_rect(
     float uls, float ult, float lrs, float lrt,
     const tex::Surface& texture,
     uint32_t argb,
-    bool translucent) {
+    bool translucent,
+    bool zbuffer_enabled) {
 
     if (!texture.valid || texture.vram == 0) {
-        submit_fill_rect(ulx, uly, lrx, lry, argb);
+        submit_fill_rect(ulx, uly, lrx, lry, argb, zbuffer_enabled);
         return;
     }
 
@@ -474,6 +515,7 @@ void Renderer::submit_tex_rect(
     key.tex_height = texture.height;
     key.cms = texture.cms;
     key.cmt = texture.cmt;
+    key.zbuffer_enabled = zbuffer_enabled;
     ensure_list(list_type);
     begin_batch(key);
 
@@ -481,9 +523,10 @@ void Renderer::submit_tex_rect(
     const float my0 = map_y(y0);
     const float mx1 = map_x(x1);
     const float my1 = map_y(y1);
+    const float rect_depth = zbuffer_enabled ? 1.0f : 0.0f;
 
     pvr_vertex_t vert{};
-    vert.z = 0.5f;
+    vert.z = rect_depth;
     vert.argb = argb;
     vert.oargb = 0;
 
@@ -514,6 +557,8 @@ void Renderer::submit_tex_rect(
     vert.v = v1;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, rect_depth, x1, y0, rect_depth, x0, y1, rect_depth, zbuffer_enabled, use_translucent);
+    record_depth_triangle(x1, y0, rect_depth, x1, y1, rect_depth, x0, y1, rect_depth, zbuffer_enabled, use_translucent);
     drew_geometry_ = true;
 }
 

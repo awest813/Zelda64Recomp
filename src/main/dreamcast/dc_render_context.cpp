@@ -7,7 +7,7 @@
 // Display lists are high-level-emulated (F3DZEX2) and geometry is submitted
 // directly to the PVR tile accelerator (SM64 DC port architecture). N64
 // TMEM staging, texture cache, combiners, S2DEX2 BgRectCopy, extended GBI
-// viewport/scissor stacks, and PVR polygon batching are implemented.
+// viewport/scissor stacks, Z-buffering, and PVR polygon batching are implemented.
 
 #ifdef DREAMCAST
 

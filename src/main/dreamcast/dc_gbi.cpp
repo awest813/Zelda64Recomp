@@ -82,6 +82,7 @@ constexpr uint8_t G_MTX_LOAD = 0x02;
 constexpr uint8_t G_MTX_PUSH = 0x01;
 constexpr uint8_t G_MTX_MODELVIEW = 0x00;
 
+constexpr uint32_t G_ZBUFFER = 0x00000001;
 constexpr uint32_t G_SHADE = 0x00000004;
 constexpr uint32_t G_FOG = 0x00010000;
 constexpr uint32_t G_LIGHTING = 0x00020000;
@@ -154,6 +155,8 @@ constexpr uint8_t G_EX_PUSHVIEWPORT_V1 = 0x15;
 constexpr uint8_t G_EX_POPVIEWPORT_V1 = 0x16;
 constexpr uint8_t G_EX_PUSHSCISSOR_V1 = 0x17;
 constexpr uint8_t G_EX_POPSCISSOR_V1 = 0x18;
+constexpr uint8_t G_EX_VERTEXZTEST_V1 = 0x0A;
+constexpr uint8_t G_EX_ENDVERTEXZTEST_V1 = 0x0B;
 constexpr uint8_t G_EX_MATRIXGROUP_V1 = 0x0C;
 constexpr uint8_t G_EX_POPMATRIXGROUP_V1 = 0x0D;
 constexpr uint8_t G_EX_SETREFRESHRATE_V1 = 0x09;
@@ -378,6 +381,13 @@ struct GbiState {
         uint8_t siz = G_IM_SIZ_16b;
     } color_image;
 
+    struct ZImage {
+        uint32_t address = 0;
+        uint16_t width = 320;
+    } z_image;
+
+    bool vertex_ztest_skip = false;
+
     uint32_t prim_color = 0xFFFFFFFF;
     uint32_t fill_color = 0;
     uint32_t env_color = 0xFFFFFFFF;
@@ -421,6 +431,15 @@ struct GbiState {
 
     float fb_width() const {
         return static_cast<float>(std::max<uint16_t>(color_image.width, 320));
+    }
+
+    bool zbuffer_enabled() const {
+        return (geometry_mode & G_ZBUFFER) != 0;
+    }
+
+    static float compute_pvr_depth(float ndc_z) {
+        // PVR DEPTHCMP_GEQUAL treats larger Z as nearer.
+        return std::clamp((1.0f - ndc_z) * 0.5f, 0.0f, 1.0f);
     }
 
     float origin_offset_x(int32_t origin, int32_t offset) const {
@@ -587,7 +606,7 @@ struct GbiState {
         out.screen_x = (tx * inv_w) * vp.scale[0] + vp.translate[0];
         out.screen_y = (ty * -inv_w) * vp.scale[1] + vp.translate[1];
         const float ndc_z = tz * inv_w;
-        out.depth = std::clamp((ndc_z + 1.0f) * 0.5f, 0.0f, 1.0f);
+        out.depth = compute_pvr_depth(ndc_z);
         out.screen_z = compute_screen_z(ndc_z, vp);
         out.fog_alpha = (geometry_mode & G_FOG) != 0 ? compute_fog_alpha(out.screen_z) : 255;
         out.tex_u = static_cast<float>((static_cast<int32_t>(v.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
@@ -714,6 +733,10 @@ struct GbiState {
 
     void fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry,
                    int32_t left_origin = G_EX_ORIGIN_NONE, int32_t right_origin = G_EX_ORIGIN_NONE) {
+        if (vertex_ztest_skip) {
+            return;
+        }
+
         ulx = apply_rect_origin_x(left_origin, ulx, rect_align.left_offset);
         uly += rect_align.top_offset;
         lrx = apply_rect_origin_x(right_origin, lrx, rect_align.right_offset);
@@ -735,11 +758,15 @@ struct GbiState {
         unpack_color(color, r, g, b, a);
 
         if (renderer != nullptr) {
-            renderer->submit_fill_rect(ulx, uly, lrx, lry, pack_argb(r, g, b, a));
+            renderer->submit_fill_rect(ulx, uly, lrx, lry, pack_argb(r, g, b, a), zbuffer_enabled());
         }
     }
 
     void submit_triangle(uint8_t i0, uint8_t i1, uint8_t i2) {
+        if (vertex_ztest_skip) {
+            return;
+        }
+
         if (i0 >= MAX_VERTICES || i1 >= MAX_VERTICES || i2 >= MAX_VERTICES) {
             return;
         }
@@ -814,6 +841,7 @@ struct GbiState {
             c2 = apply_fog_blend(c2, v2.fog_alpha);
         }
         const bool translucent = ((c0 | c1 | c2) & 0xFFu) < 255u;
+        const bool z_enabled = zbuffer_enabled();
 
         const bool use_texture = texture_on && loaded_textures[0].valid
             && (combine_mode == 0 || combine_uses_texel0());
@@ -827,21 +855,21 @@ struct GbiState {
                 v0.screen_x, v0.screen_y, v0.depth, tu0, tv0, c0,
                 v1.screen_x, v1.screen_y, v1.depth, tu1, tv1, c1,
                 v2.screen_x, v2.screen_y, v2.depth, tu2, tv2, c2,
-                surface, translucent
+                surface, translucent, z_enabled
             );
         } else {
             renderer->submit_triangle(
                 v0.screen_x, v0.screen_y, v0.depth, c0,
                 v1.screen_x, v1.screen_y, v1.depth, c1,
                 v2.screen_x, v2.screen_y, v2.depth, c2,
-                translucent
+                translucent, z_enabled
             );
         }
     }
 
     void draw_tex_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip,
                        int32_t left_origin = G_EX_ORIGIN_NONE, int32_t right_origin = G_EX_ORIGIN_NONE) {
-        if (renderer == nullptr) {
+        if (renderer == nullptr || vertex_ztest_skip) {
             return;
         }
 
@@ -867,7 +895,10 @@ struct GbiState {
         }
         const bool translucent = (vtx_color & 0xFFu) < 255u;
 
-        renderer->submit_tex_rect(ulx, uly, lrx, lry, static_cast<float>(uls), static_cast<float>(ult), lrs, lrt, surface, vtx_color, translucent);
+        renderer->submit_tex_rect(
+            ulx, uly, lrx, lry,
+            static_cast<float>(uls), static_cast<float>(ult), lrs, lrt,
+            surface, vtx_color, translucent, zbuffer_enabled());
     }
 
     void draw_tri(uint8_t a, uint8_t b, uint8_t c) {
@@ -1150,6 +1181,11 @@ struct GbiState {
             static_cast<uint16_t>(dl->p0(0, 12) + 1),
             dl->w1
         );
+    }
+
+    static void dl_setzimg(GbiState& s, DisplayList*& dl) {
+        s.z_image.address = s.from_segmented(dl->w1) & 0x00FFFFFF;
+        s.z_image.width = s.color_image.width;
     }
 
     static void dl_setprimcolor(GbiState& s, DisplayList*& dl) {
@@ -1569,6 +1605,22 @@ struct GbiState {
             s.scissor_align.lrx_bound = static_cast<int16_t>(dl->p1(16, 16));
             s.scissor_align.lry_bound = static_cast<int16_t>(dl->p1(0, 16));
             break;
+        case G_EX_VERTEXZTEST_V1: {
+            const uint8_t vtx_index = static_cast<uint8_t>(dl->p1(0, 8));
+            s.vertex_ztest_skip = false;
+            if (!s.vtx_loaded[vtx_index]) {
+                s.transform_vertex(vtx_index);
+            }
+            const TransformedVertex& test_vert = s.xf_buffer[vtx_index];
+            if (s.renderer != nullptr
+                && s.renderer->is_occluded(test_vert.screen_x, test_vert.screen_y, test_vert.depth)) {
+                s.vertex_ztest_skip = true;
+            }
+            break;
+        }
+        case G_EX_ENDVERTEXZTEST_V1:
+            s.vertex_ztest_skip = false;
+            break;
         case G_EX_MATRIXGROUP_V1: {
             dl++;
             const uint32_t flags = dl->w0;
@@ -1717,7 +1769,7 @@ struct GbiState {
         gbi_dispatch[G_RDPPIPESYNC] = dl_noop;
         gbi_dispatch[G_RDPTILESYNC] = dl_noop;
         gbi_dispatch[G_RDPFULLSYNC] = dl_noop;
-        gbi_dispatch[G_SETZIMG] = dl_noop;
+        gbi_dispatch[G_SETZIMG] = dl_setzimg;
         gbi_dispatch[G_SETTIMG] = dl_settimg;
         gbi_dispatch[G_SETCOMBINE] = dl_setcombine;
         gbi_dispatch[G_SETTILE] = dl_settile;
