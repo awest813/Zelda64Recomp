@@ -31,7 +31,7 @@
 | Post-build `1ST_READ.BIN` packaging | ✅ | — |
 | Host-side N64Recomp / RSPRecomp codegen | ✅ | Requires ROM + generated `RecompiledFuncs/` (not in repo) |
 | GD-ROM disc image workflow (`scramble`, `makeip`, `mkdcdisc`) | 🟡 | Documented in `BUILDING.md`; manual steps only |
-| Dreamcast CI / automated builds | ❌ | No workflow in `.github/workflows/` |
+| Dreamcast CI / automated builds | 🟡 | `dreamcast.yml` syntax-checks all DC sources with the KOS SH-4 toolchain on push/PR; full link needs ROM-derived codegen (out of CI scope) |
 | sh4zam optimized matrix math (`-DDC_HAS_SH4ZAM`) | 🟡 | Optional; off by default |
 
 ### Core runtime
@@ -116,7 +116,7 @@
 | Choice / info prompts (BIOS font + PVR panel) | ✅ | — |
 | D-pad menu navigation | ✅ | — |
 | Full RmlUi launcher | ➖ | Replaced by minimal `dc_ui.cpp` |
-| In-game config menu (graphics, sound, controls) | ❌ | `set_config_tab()` no-op; no tabs |
+| In-game config menu (sound, gameplay, controls) | 🟡 | `open_config_menu()` (L+R+Start) edits volume, beeps, targeting, autosave, camera invert, rumble, deadzone; saves to VMU. No graphics/resolution tab (fixed 640×480) |
 | Mod list / configure UI | ➖ | Stubbed |
 | Image / drag-drop assets | ➖ | No-ops |
 | Quit prompt | 🟡 | Logs and calls `platform_shutdown()`; no confirmation UI |
@@ -128,7 +128,7 @@
 |---------|--------|---------|
 | VMU save / load / delete (VMS packaging) | ✅ | — |
 | VMU free-block query | ✅ | — |
-| Config JSON on VMU (`config.cpp` + `dc_config.cpp`) | ✅ | Persists; no in-game editor to change values |
+| Config JSON on VMU (`config.cpp` + `dc_config.cpp`) | ✅ | Persists; in-game editor via `open_config_menu()` (L+R+Start) |
 | Autosaving patch + VMU backend | ✅ | Shared autosave logic |
 | GD-ROM file read | ✅ | — |
 | Multi-file dialogs | ➖ | Returns failure |
@@ -157,13 +157,13 @@
 ## Summary by area
 
 ```
-Build & toolchain     ████████░░  80%   (CI + disc automation missing)
+Build & toolchain     █████████░  90%   (DC syntax-check CI added; disc automation manual)
 Core runtime          █████████░  90%   (codegen external; quicksave N/A)
 Boot & distribution   ███████░░░  70%   (works; weak error UX)
 Rendering (PVR)       ████████░░  80%   (broad GBI; interpolation & HW verify)
 Audio                 ██████████ 100%
 Input & controls      ███████░░░  70%   (playable mapping; no rebind UI)
-UI & menus            ████░░░░░░  40%   (prompts only; no config launcher)
+UI & menus            ██████░░░░  60%   (prompts + in-game options menu; no full launcher)
 Storage & saves       █████████░  90%   (VMU done; config edit UX missing)
 Gameplay              ░░░░░░░░░░   ?%   (needs end-to-end hardware validation)
 Performance           ░░░░░░░░░░   ?%   (biggest unknown for “fully playable”)
@@ -184,10 +184,10 @@ Ordered by dependency. Items marked **blocker** must be resolved before the port
 | 5 | **VMU save/load in real play** | High | Verify autosave + manual save across power cycle |
 | 6 | **Audio sync & dropouts** | High | Stress AICA buffer under load |
 | 7 | **On-screen error reporting** | Medium | Replace stderr-only failures (missing ROM, VMU full) |
-| 8 | **Minimal config UI** | Medium | Volume, autosave, targeting — values persist but are not editable in-game |
+| 8 | **Minimal config UI** | Medium | Done — `open_config_menu()` (L+R+Start) edits volume, beeps, targeting, autosave, camera invert, rumble, deadzone; persists to VMU. Hardware-verify the combo + navigation |
 | 9 | **Widescreen visual QA** | Low | GBI support exists; verify patches on 4:3 DC output |
 | 10 | **Disc build automation** | Low | Script `scramble` / `makeip` / `mkdcdisc` in CI or Makefile |
-| 11 | **DC CI workflow** | Low | Cross-compile on push (no hardware required) |
+| 11 | **DC CI workflow** | Low | Done — `.github/workflows/dreamcast.yml` runs `-fsyntax-only` over the DC sources with the KOS toolchain on every push/PR that touches them |
 
 ---
 
@@ -218,6 +218,7 @@ These PC features are disabled by design (`include/dreamcast_platform.h`) and ar
 | UI | `src/ui/dreamcast/dc_ui.cpp` |
 | Build docs | `BUILDING.md` § “Building for Dreamcast (Experimental)” |
 | Toolchain | `cmake/Toolchains/dreamcast.cmake` |
+| CI syntax check | `.github/workflows/dreamcast.yml` + `.github/dreamcast/syntax-check.sh` |
 
 ---
 

@@ -98,6 +98,11 @@ namespace recompui {
     // BIOS-font text drawn to the framebuffer after the PVR frame is presented.
     void render_menu_overlay();
     void handle_menu_input(uint32_t buttons_pressed);
+    // Opens the in-game config menu (volume, autosave, targeting, etc.). The
+    // input backend triggers this from a controller combo during gameplay.
+    // Values are written through the zelda64 config setters and persisted to
+    // the VMU when the menu is dismissed.
+    void open_config_menu();
 }
 
 #endif // DREAMCAST

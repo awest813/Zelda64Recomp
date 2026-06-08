@@ -1,0 +1,63 @@
+name: dreamcast
+
+# Cross-compiles the Dreamcast-specific sources with the KallistiOS SH-4
+# toolchain to guard them against build regressions. The PC validate pipeline
+# never builds these files (they are behind #ifdef DREAMCAST), so without this
+# job a change can break the Dreamcast port silently.
+#
+# A full link is intentionally out of scope: the final binary needs the per-ROM
+# recompiler output (RecompiledFuncs/), which is generated from a copyrighted
+# ROM that is not in the repository. This job therefore runs a -fsyntax-only
+# compile of every DC translation unit (see .github/dreamcast/syntax-check.sh).
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - 'src/main/dreamcast/**'
+      - 'src/game/dreamcast/**'
+      - 'src/ui/dreamcast/**'
+      - 'include/dreamcast_platform.h'
+      - 'include/dc_*.h'
+      - 'cmake/Toolchains/dreamcast.cmake'
+      - '.github/dreamcast/**'
+      - '.github/workflows/dreamcast.yml'
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - 'src/main/dreamcast/**'
+      - 'src/game/dreamcast/**'
+      - 'src/ui/dreamcast/**'
+      - 'include/dreamcast_platform.h'
+      - 'include/dc_*.h'
+      - 'cmake/Toolchains/dreamcast.cmake'
+      - '.github/dreamcast/**'
+      - '.github/workflows/dreamcast.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    name: KallistiOS SH-4 syntax check
+    container:
+      # Prebuilt KallistiOS SH-4 toolchain (KOS at /opt/toolchains/dc/kos).
+      image: einsteinx2/dcdev-kos-toolchain:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          # ultramodern / librecomp / N64Recomp headers live in the
+          # N64ModernRuntime submodule (and its nested submodules).
+          submodules: recursive
+      - name: Syntax-check Dreamcast sources
+        shell: bash
+        run: |
+          source /opt/toolchains/dc/kos/environ.sh
+          chmod +x .github/dreamcast/syntax-check.sh
+          .github/dreamcast/syntax-check.sh

@@ -179,6 +179,12 @@ void maple_poll() {
     prev_buttons = state->buttons;
     if (recompui::is_any_context_shown()) {
         recompui::handle_menu_input(pressed);
+    } else if ((pressed & DC_BTN_START) && state->ltrig > 128 && state->rtrig > 128) {
+        // L + R + Start opens the in-game options menu. This combo is unlikely
+        // during normal play (Start alone stays mapped to the N64 Start button),
+        // and gives the player a way to edit the VMU-persisted settings without
+        // a PC-style launcher.
+        recompui::open_config_menu();
     }
 
     // Apply the user-configured deadzone (stored as an integer percentage).
