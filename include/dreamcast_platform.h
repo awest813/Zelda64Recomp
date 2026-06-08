@@ -89,10 +89,13 @@ namespace dreamcast {
 }
 
 // ── Dreamcast UI overlay (implemented in src/ui/dreamcast/dc_ui.cpp) ──
-// The render context calls render_menu_overlay() once the PVR frame has been
-// presented; the input backend forwards freshly-pressed Maple buttons to
-// handle_menu_input() while a menu context is visible.
+// The render context calls render_menu_pvr_background() before pvr_scene_finish()
+// and render_menu_overlay() afterward for BIOS-font text. The input backend
+// forwards freshly-pressed Maple buttons to handle_menu_input() while visible.
 namespace recompui {
+    // Translucent PVR panel drawn before pvr_scene_finish().
+    void render_menu_pvr_background();
+    // BIOS-font text drawn to the framebuffer after the PVR frame is presented.
     void render_menu_overlay();
     void handle_menu_input(uint32_t buttons_pressed);
 }

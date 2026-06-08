@@ -83,6 +83,7 @@ constexpr uint8_t G_MTX_PUSH = 0x01;
 constexpr uint8_t G_MTX_MODELVIEW = 0x00;
 
 constexpr uint32_t G_SHADE = 0x00000004;
+constexpr uint32_t G_FOG = 0x00010000;
 constexpr uint32_t G_LIGHTING = 0x00020000;
 constexpr uint32_t G_CULL_FRONT = 0x00000200;
 constexpr uint32_t G_CULL_BACK = 0x00000400;
@@ -230,6 +231,7 @@ struct TransformedVertex {
     float screen_x = 0.0f;
     float screen_y = 0.0f;
     float depth = 0.5f;
+    float screen_z = 0.0f;
     float tex_u = 0.0f;
     float tex_v = 0.0f;
     float w = 1.0f;
@@ -237,6 +239,7 @@ struct TransformedVertex {
     uint8_t g = 255;
     uint8_t b = 255;
     uint8_t a = 255;
+    uint8_t fog_alpha = 255;
 };
 
 struct ScissorRect {
@@ -380,6 +383,7 @@ struct GbiState {
     uint32_t env_color = 0xFFFFFFFF;
     uint32_t blend_color = 0;
     uint32_t fog_color = 0;
+    uint32_t fog_factor = 0;
     uint64_t combine_mode = 0;
 
     tmem::Buffer tmem{};
@@ -584,6 +588,8 @@ struct GbiState {
         out.screen_y = (ty * -inv_w) * vp.scale[1] + vp.translate[1];
         const float ndc_z = tz * inv_w;
         out.depth = std::clamp((ndc_z + 1.0f) * 0.5f, 0.0f, 1.0f);
+        out.screen_z = compute_screen_z(ndc_z, vp);
+        out.fog_alpha = (geometry_mode & G_FOG) != 0 ? compute_fog_alpha(out.screen_z) : 255;
         out.tex_u = static_cast<float>((static_cast<int32_t>(v.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
         out.tex_v = static_cast<float>((static_cast<int32_t>(v.t) * static_cast<int32_t>(texture_scale_t)) >> 16);
         if (geometry_mode & G_LIGHTING) {
@@ -657,6 +663,53 @@ struct GbiState {
              | (static_cast<uint32_t>(r) << 16)
              | (static_cast<uint32_t>(g) << 8)
              | static_cast<uint32_t>(b);
+    }
+
+    // N64 screen Z used by the RSP fog path: 32 * ((z/w) * vscale[2] + vtrans[2]).
+    float compute_screen_z(float ndc_z, const Viewport& vp) const {
+        const float raw_scale_z = vp.scale[2] * DEPTH_RANGE;
+        const float raw_trans_z = vp.translate[2] * DEPTH_RANGE;
+        return 32.0f * (ndc_z * raw_scale_z + raw_trans_z);
+    }
+
+    // Fog visibility alpha: 255 = no fog (near), 0 = full fog (far).
+    uint8_t compute_fog_alpha(float screen_z) const {
+        const uint16_t fog_min = static_cast<uint16_t>(fog_factor & 0xFFFFu);
+        const uint16_t fog_max = static_cast<uint16_t>((fog_factor >> 16) & 0xFFFFu);
+        if (fog_max <= fog_min) {
+            return 255;
+        }
+        if (screen_z <= static_cast<float>(fog_min)) {
+            return 255;
+        }
+        if (screen_z >= static_cast<float>(fog_max)) {
+            return 0;
+        }
+        const float t = (screen_z - static_cast<float>(fog_min))
+            / (static_cast<float>(fog_max) - static_cast<float>(fog_min));
+        return static_cast<uint8_t>((1.0f - t) * 255.0f);
+    }
+
+    // G_RM_FOG_SHADE_A: lerp combiner output toward fog color using per-vertex fog alpha.
+    uint32_t apply_fog_blend(uint32_t color, uint8_t fog_alpha) const {
+        if ((geometry_mode & G_FOG) == 0) {
+            return color;
+        }
+
+        uint8_t r, g, b, a;
+        unpack_color(color, r, g, b, a);
+        uint8_t fr, fg, fb, fa;
+        unpack_color(fog_color, fr, fg, fb, fa);
+        (void)fa;
+
+        const float visibility = fog_alpha / 255.0f;
+        const float fog_weight = 1.0f - visibility;
+        return pack_argb(
+            static_cast<uint8_t>(std::min(255.0f, r * visibility + fr * fog_weight)),
+            static_cast<uint8_t>(std::min(255.0f, g * visibility + fg * fog_weight)),
+            static_cast<uint8_t>(std::min(255.0f, b * visibility + fb * fog_weight)),
+            255
+        );
     }
 
     void fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry,
@@ -752,9 +805,14 @@ struct GbiState {
             a0 = a1 = a2 = pa;
         }
 
-        const uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0);
-        const uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1);
-        const uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2);
+        uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0);
+        uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1);
+        uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2);
+        if (geometry_mode & G_FOG) {
+            c0 = apply_fog_blend(c0, v0.fog_alpha);
+            c1 = apply_fog_blend(c1, v1.fog_alpha);
+            c2 = apply_fog_blend(c2, v2.fog_alpha);
+        }
         const bool translucent = ((c0 | c1 | c2) & 0xFFu) < 255u;
 
         const bool use_texture = texture_on && loaded_textures[0].valid
@@ -803,7 +861,10 @@ struct GbiState {
         const float lrt = static_cast<float>(((ult << 7) + dtdy * height) >> 7);
 
         const tex::Surface surface = resolve_texture();
-        const uint32_t vtx_color = vertex_combine_factor(255, 255, 255, 255);
+        uint32_t vtx_color = vertex_combine_factor(255, 255, 255, 255);
+        if (geometry_mode & G_FOG) {
+            vtx_color = apply_fog_blend(vtx_color, compute_fog_alpha(0.0f));
+        }
         const bool translucent = (vtx_color & 0xFFu) < 255u;
 
         renderer->submit_tex_rect(ulx, uly, lrx, lry, static_cast<float>(uls), static_cast<float>(ult), lrs, lrt, surface, vtx_color, translucent);
@@ -952,6 +1013,9 @@ struct GbiState {
             break;
         case G_MW_FORCEMTX:
             s.mvp_dirty = (dl->w1 == 0);
+            break;
+        case G_MW_FOG:
+            s.fog_factor = dl->w1;
             break;
         default:
             break;

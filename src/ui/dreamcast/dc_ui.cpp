@@ -54,6 +54,7 @@ static MenuState current_menu{};
 constexpr uint32_t COLOR_WHITE      = 0xFFFFFFFF;
 constexpr uint32_t COLOR_YELLOW     = 0xFFFFFF00;
 constexpr uint32_t COLOR_GRAY       = 0xFF808080;
+constexpr uint32_t MENU_PANEL_ARGB  = 0xC0000000; // 75% opaque black
 
 // Font metrics (BIOS font)
 constexpr int FONT_CHAR_H = 24;
@@ -261,14 +262,79 @@ void release_image(const std::string& /*src*/) {}
 
 void drop_files(const std::list<std::filesystem::path>& /*file_list*/) {}
 
-// ── Menu rendering (called during PVR scene) ─────────────────────────
+// ── Menu rendering ───────────────────────────────────────────────────
+
+int menu_panel_height() {
+    if (!current_menu.visible) {
+        return 0;
+    }
+    int height = MENU_PADDING * 2 + FONT_CHAR_H + MENU_ITEM_SPACING * 2;
+    height += static_cast<int>(current_menu.entries.size()) * (FONT_CHAR_H + MENU_ITEM_SPACING);
+    return height;
+}
+
+void render_menu_pvr_background() {
+    if (!current_menu.visible) {
+        return;
+    }
+
+    const int panel_h = menu_panel_height();
+    if (panel_h <= 0) {
+        return;
+    }
+
+    pvr_poly_cxt_t cxt;
+    pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
+    cxt.gen.culling = PVR_CULLING_NONE;
+    cxt.gen.shading = PVR_SHADE_FLAT;
+    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+    cxt.blend.src = PVR_BLEND_SRCALPHA;
+    cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+
+    pvr_poly_hdr_t hdr;
+    pvr_poly_compile(&hdr, &cxt);
+
+    pvr_list_begin(PVR_LIST_TR_POLY);
+    pvr_prim(&hdr, sizeof(pvr_poly_hdr_t));
+
+    const float x0 = static_cast<float>(MENU_PADDING);
+    const float y0 = static_cast<float>(MENU_PADDING);
+    const float x1 = static_cast<float>(DC_SCREEN_WIDTH - MENU_PADDING);
+    const float y1 = static_cast<float>(MENU_PADDING + panel_h);
+
+    pvr_vertex_t vert{};
+    vert.z = 0.1f;
+    vert.argb = MENU_PANEL_ARGB;
+    vert.oargb = 0;
+
+    vert.flags = PVR_CMD_VERTEX;
+    vert.x = x0;
+    vert.y = y0;
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    vert.x = x1;
+    vert.y = y0;
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    vert.flags = PVR_CMD_VERTEX;
+    vert.x = x0;
+    vert.y = y1;
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    vert.flags = PVR_CMD_VERTEX_EOL;
+    vert.x = x1;
+    vert.y = y1;
+    pvr_prim(&vert, sizeof(pvr_vertex_t));
+
+    pvr_list_finish();
+}
 
 void render_menu_overlay() {
     if (!current_menu.visible) return;
 
-    // Render using the Dreamcast BIOS bitmap font with RGB565 colors.
-    // Text is drawn directly to the framebuffer; a future improvement would
-    // be to composite via a PVR semi-transparent background quad.
+    // BIOS-font labels are drawn directly to the framebuffer after the PVR
+    // frame is presented. The translucent panel is submitted via PVR first.
 
     int y = MENU_PADDING;
 
