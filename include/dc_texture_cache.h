@@ -39,6 +39,21 @@ struct Surface {
     bool valid = false;
 };
 
+struct TexelColor {
+    uint8_t r = 255;
+    uint8_t g = 255;
+    uint8_t b = 255;
+    uint8_t a = 255;
+};
+
+// Point-sample a texel from staged TMEM data (used by the color combiner).
+TexelColor sample_texel(
+    const LoadedTexture& tex,
+    const TileState& tile,
+    const uint8_t* palette,
+    int x,
+    int y);
+
 // LRU-ish texture cache: imports N64 RDRAM tiles into PVR VRAM (ARGB1555/4444).
 class Cache {
 public:

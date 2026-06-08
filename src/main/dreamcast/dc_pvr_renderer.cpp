@@ -28,10 +28,70 @@ constexpr uint8_t G_TX_MIRROR = 0x1;
 constexpr uint8_t G_TX_CLAMP = 0x2;
 
 bool needs_translucent(uint32_t argb0, uint32_t argb1, uint32_t argb2) {
-    const uint32_t a0 = argb0 & 0xFF;
-    const uint32_t a1 = argb1 & 0xFF;
-    const uint32_t a2 = argb2 & 0xFF;
-    return (a0 < 255u) || (a1 < 255u) || (a2 < 255u);
+    // Combiner output is ARGB (alpha in bits 24-31).
+    return ((argb0 | argb1 | argb2) & 0xFF000000u) != 0xFF000000u;
+}
+
+uint32_t apply_alpha_threshold(uint32_t argb, uint8_t threshold) {
+    if (threshold == 0) {
+        return argb;
+    }
+    const uint8_t a = static_cast<uint8_t>((argb >> 24) & 0xFFu);
+    if (a < threshold) {
+        return argb & 0x00FFFFFFu;
+    }
+    return argb;
+}
+
+rdp::BlendState merge_blend(
+    const rdp::BlendState& rdp_blend,
+    bool vertex_translucent,
+    uint32_t argb0,
+    uint32_t argb1,
+    uint32_t argb2) {
+
+    rdp::BlendState merged = rdp_blend;
+    if (rdp_blend.punch_through && rdp_blend.alpha_threshold > 0) {
+        const uint32_t t0 = apply_alpha_threshold(argb0, rdp_blend.alpha_threshold);
+        const uint32_t t1 = apply_alpha_threshold(argb1, rdp_blend.alpha_threshold);
+        const uint32_t t2 = apply_alpha_threshold(argb2, rdp_blend.alpha_threshold);
+        if (((t0 | t1 | t2) & 0xFF000000u) == 0) {
+            merged.list_type = PVR_LIST_PT_POLY;
+            merged.punch_through = true;
+            merged.translucent = false;
+            merged.blend_enable = false;
+            return merged;
+        }
+        vertex_translucent = needs_translucent(t0, t1, t2);
+    }
+
+    if (vertex_translucent && !merged.punch_through) {
+        merged.translucent = true;
+        merged.list_type = PVR_LIST_TR_POLY;
+        if (!merged.blend_enable) {
+            merged.blend_enable = true;
+            merged.blend_src = PVR_BLEND_SRCALPHA;
+            merged.blend_dst = PVR_BLEND_INVSRCALPHA;
+        }
+        merged.depth_write = false;
+    }
+    return merged;
+}
+
+rdp::BlendState merge_blend(const rdp::BlendState& rdp_blend, bool vertex_translucent, uint32_t argb) {
+    return merge_blend(rdp_blend, vertex_translucent, argb, argb, argb);
+}
+
+void apply_blend_to_key(BatchKey& key, const rdp::BlendState& blend, bool zbuffer_enabled) {
+    key.list_type = blend.list_type;
+    key.translucent = blend.translucent;
+    key.punch_through = blend.punch_through;
+    key.zbuffer_enabled = zbuffer_enabled;
+    key.depth_write = zbuffer_enabled && blend.depth_write;
+    key.depth_compare = blend.depth_compare;
+    key.blend_enable = blend.blend_enable;
+    key.blend_src = blend.blend_src;
+    key.blend_dst = blend.blend_dst;
 }
 
 } // anonymous namespace
@@ -41,6 +101,13 @@ bool Renderer::BatchKey::operator==(const BatchKey& other) const {
         && textured == other.textured
         && translucent == other.translucent
         && gouraud == other.gouraud
+        && zbuffer_enabled == other.zbuffer_enabled
+        && depth_write == other.depth_write
+        && punch_through == other.punch_through
+        && depth_compare == other.depth_compare
+        && blend_enable == other.blend_enable
+        && blend_src == other.blend_src
+        && blend_dst == other.blend_dst
         && texture_vram == other.texture_vram
         && pvr_format == other.pvr_format
         && tex_stride == other.tex_stride
@@ -75,6 +142,27 @@ void Renderer::set_framebuffer_size(uint16_t width, uint16_t height) {
     mapping_.fb_width = width;
     mapping_.fb_height = height;
     update_mapping();
+    update_zbuffer_size();
+}
+
+void Renderer::update_zbuffer_size() {
+    zbuffer_.set_size(mapping_.fb_width, mapping_.fb_height);
+}
+
+bool Renderer::is_occluded(float n64_x, float n64_y, float depth) const {
+    return zbuffer_.is_occluded(n64_x, n64_y, depth);
+}
+
+void Renderer::record_depth_triangle(
+    float x0, float y0, float z0,
+    float x1, float y1, float z1,
+    float x2, float y2, float z2,
+    bool zbuffer_enabled,
+    bool translucent) {
+    if (!zbuffer_enabled || translucent) {
+        return;
+    }
+    zbuffer_.rasterize_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2);
 }
 
 void Renderer::update_mapping() {
@@ -186,11 +274,22 @@ void Renderer::begin_batch(const BatchKey& key) {
 
     cxt.gen.shading = key.gouraud ? PVR_SHADE_GOURAUD : PVR_SHADE_FLAT;
     cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.depth.comparison = key.textured && !key.gouraud ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GEQUAL;
-    cxt.depth.write = key.translucent ? PVR_DEPTHWRITE_DISABLE : PVR_DEPTHWRITE_ENABLE;
-    if (key.translucent) {
-        cxt.blend.src = PVR_BLEND_SRCALPHA;
-        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+    if (!key.zbuffer_enabled) {
+        cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+        cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+    } else {
+        cxt.depth.comparison = static_cast<pvr_depthcmp_mode_t>(key.depth_compare);
+        cxt.depth.write = key.depth_write ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
+    }
+    if (key.punch_through) {
+        cxt.gen.alpha = true;
+        if (key.textured) {
+            cxt.txr.alpha = false;
+        }
+    }
+    if (key.blend_enable) {
+        cxt.blend.src = static_cast<pvr_blend_mode_t>(key.blend_src);
+        cxt.blend.dst = static_cast<pvr_blend_mode_t>(key.blend_dst);
     }
 
     pvr_poly_compile(&batch_hdr_, &cxt);
@@ -208,12 +307,13 @@ void Renderer::clear_screen() {
     key.list_type = PVR_LIST_OP_POLY;
     key.gouraud = false;
     key.translucent = false;
+    key.zbuffer_enabled = false;
     ensure_list(key.list_type);
     begin_batch(key);
     flush_batch();
 
     pvr_vertex_t vert{};
-    vert.z = 1.0f;
+    vert.z = 0.0f;
     vert.argb = 0xFF000000;
     vert.oargb = 0;
 
@@ -253,6 +353,8 @@ void Renderer::begin_frame() {
     batch_hdr_valid_ = false;
 
     update_mapping();
+    update_zbuffer_size();
+    zbuffer_.clear();
     clear_screen();
 }
 
@@ -273,20 +375,26 @@ void Renderer::submit_triangle(
     float x0, float y0, float z0, uint32_t argb0,
     float x1, float y1, float z1, uint32_t argb1,
     float x2, float y2, float z2, uint32_t argb2,
-    bool translucent) {
+    const rdp::BlendState& blend,
+    bool zbuffer_enabled) {
 
     if (!scene_active_) {
         begin_frame();
     }
 
-    const bool use_translucent = translucent || needs_translucent(argb0, argb1, argb2);
-    const int list_type = use_translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
+    const rdp::BlendState use_blend = merge_blend(
+        blend, needs_translucent(argb0, argb1, argb2), argb0, argb1, argb2);
+    const uint32_t c0 = apply_alpha_threshold(argb0, blend.alpha_threshold);
+    const uint32_t c1 = apply_alpha_threshold(argb1, blend.alpha_threshold);
+    const uint32_t c2 = apply_alpha_threshold(argb2, blend.alpha_threshold);
+    if (((c0 | c1 | c2) & 0xFF000000u) == 0) {
+        return;
+    }
 
     BatchKey key{};
-    key.list_type = list_type;
-    key.translucent = use_translucent;
     key.gouraud = true;
-    ensure_list(list_type);
+    apply_blend_to_key(key, use_blend, zbuffer_enabled);
+    ensure_list(key.list_type);
     begin_batch(key);
 
     pvr_vertex_t vert{};
@@ -296,22 +404,23 @@ void Renderer::submit_triangle(
     vert.x = map_x(x0);
     vert.y = map_y(y0);
     vert.z = z0;
-    vert.argb = argb0;
+    vert.argb = c0;
     submit_vertex_dr(vert);
 
     vert.x = map_x(x1);
     vert.y = map_y(y1);
     vert.z = z1;
-    vert.argb = argb1;
+    vert.argb = c1;
     submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX_EOL;
     vert.x = map_x(x2);
     vert.y = map_y(y2);
     vert.z = z2;
-    vert.argb = argb2;
+    vert.argb = c2;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2, zbuffer_enabled, use_blend.translucent);
     drew_geometry_ = true;
 }
 
@@ -320,10 +429,11 @@ void Renderer::submit_textured_triangle(
     float x1, float y1, float z1, float u1, float v1, uint32_t argb1,
     float x2, float y2, float z2, float u2, float v2, uint32_t argb2,
     const tex::Surface& texture,
-    bool translucent) {
+    const rdp::BlendState& blend,
+    bool zbuffer_enabled) {
 
     if (!texture.valid || texture.vram == 0) {
-        submit_triangle(x0, y0, z0, argb0, x1, y1, z1, argb1, x2, y2, z2, argb2, translucent);
+        submit_triangle(x0, y0, z0, argb0, x1, y1, z1, argb1, x2, y2, z2, argb2, blend, zbuffer_enabled);
         return;
     }
 
@@ -331,13 +441,17 @@ void Renderer::submit_textured_triangle(
         begin_frame();
     }
 
-    const bool use_translucent = translucent || needs_translucent(argb0, argb1, argb2);
-    const int list_type = use_translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
+    const rdp::BlendState use_blend = merge_blend(
+        blend, needs_translucent(argb0, argb1, argb2), argb0, argb1, argb2);
+    const uint32_t c0 = apply_alpha_threshold(argb0, blend.alpha_threshold);
+    const uint32_t c1 = apply_alpha_threshold(argb1, blend.alpha_threshold);
+    const uint32_t c2 = apply_alpha_threshold(argb2, blend.alpha_threshold);
+    if (((c0 | c1 | c2) & 0xFF000000u) == 0) {
+        return;
+    }
 
     BatchKey key{};
-    key.list_type = list_type;
     key.textured = true;
-    key.translucent = use_translucent;
     key.gouraud = true;
     key.texture_vram = texture.vram;
     key.pvr_format = texture.pvr_format;
@@ -345,7 +459,8 @@ void Renderer::submit_textured_triangle(
     key.tex_height = texture.height;
     key.cms = texture.cms;
     key.cmt = texture.cmt;
-    ensure_list(list_type);
+    apply_blend_to_key(key, use_blend, zbuffer_enabled);
+    ensure_list(key.list_type);
     begin_batch(key);
 
     pvr_vertex_t vert{};
@@ -357,7 +472,7 @@ void Renderer::submit_textured_triangle(
     vert.z = z0;
     vert.u = u0;
     vert.v = v0;
-    vert.argb = argb0;
+    vert.argb = c0;
     submit_vertex_dr(vert);
 
     vert.x = map_x(x1);
@@ -365,7 +480,7 @@ void Renderer::submit_textured_triangle(
     vert.z = z1;
     vert.u = u1;
     vert.v = v1;
-    vert.argb = argb1;
+    vert.argb = c1;
     submit_vertex_dr(vert);
 
     vert.flags = PVR_CMD_VERTEX_EOL;
@@ -374,13 +489,14 @@ void Renderer::submit_textured_triangle(
     vert.z = z2;
     vert.u = u2;
     vert.v = v2;
-    vert.argb = argb2;
+    vert.argb = c2;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2, zbuffer_enabled, use_blend.translucent);
     drew_geometry_ = true;
 }
 
-void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint32_t argb) {
+void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint32_t argb, const rdp::BlendState& blend, bool zbuffer_enabled) {
     if (!scene_active_) {
         begin_frame();
     }
@@ -390,24 +506,27 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     const float x1 = static_cast<float>(lrx) / 4.0f;
     const float y1 = static_cast<float>(lry) / 4.0f;
 
-    const bool translucent = (argb & 0xFFu) < 255u;
-    const int list_type = translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
+    const uint32_t vtx_color = apply_alpha_threshold(argb, blend.alpha_threshold);
+    if ((vtx_color & 0xFF000000u) == 0) {
+        return;
+    }
+    const rdp::BlendState use_blend = merge_blend(blend, (vtx_color & 0xFF000000u) != 0xFF000000u, vtx_color);
 
     BatchKey key{};
-    key.list_type = list_type;
-    key.translucent = translucent;
     key.gouraud = false;
-    ensure_list(list_type);
+    apply_blend_to_key(key, use_blend, zbuffer_enabled);
+    ensure_list(key.list_type);
     begin_batch(key);
 
     const float mx0 = map_x(x0);
     const float my0 = map_y(y0);
     const float mx1 = map_x(x1);
     const float my1 = map_y(y1);
+    const float rect_depth = zbuffer_enabled ? 1.0f : 0.0f;
 
     pvr_vertex_t vert{};
-    vert.z = 0.5f;
-    vert.argb = argb;
+    vert.z = rect_depth;
+    vert.argb = vtx_color;
     vert.oargb = 0;
 
     vert.flags = PVR_CMD_VERTEX;
@@ -429,6 +548,8 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     vert.y = my1;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, rect_depth, x1, y0, rect_depth, x0, y1, rect_depth, zbuffer_enabled, use_blend.translucent);
+    record_depth_triangle(x1, y0, rect_depth, x1, y1, rect_depth, x0, y1, rect_depth, zbuffer_enabled, use_blend.translucent);
     drew_geometry_ = true;
 }
 
@@ -437,10 +558,11 @@ void Renderer::submit_tex_rect(
     float uls, float ult, float lrs, float lrt,
     const tex::Surface& texture,
     uint32_t argb,
-    bool translucent) {
+    const rdp::BlendState& blend,
+    bool zbuffer_enabled) {
 
     if (!texture.valid || texture.vram == 0) {
-        submit_fill_rect(ulx, uly, lrx, lry, argb);
+        submit_fill_rect(ulx, uly, lrx, lry, argb, blend, zbuffer_enabled);
         return;
     }
 
@@ -460,13 +582,14 @@ void Renderer::submit_tex_rect(
     const float u1 = lrs / tex_w;
     const float v1 = lrt / tex_h;
 
-    const bool use_translucent = translucent || ((argb & 0xFFu) < 255u);
-    const int list_type = use_translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
+    const uint32_t vtx_color = apply_alpha_threshold(argb, blend.alpha_threshold);
+    if ((vtx_color & 0xFF000000u) == 0 && !blend.punch_through) {
+        return;
+    }
+    const rdp::BlendState use_blend = merge_blend(blend, (vtx_color & 0xFF000000u) != 0xFF000000u, vtx_color);
 
     BatchKey key{};
-    key.list_type = list_type;
     key.textured = true;
-    key.translucent = use_translucent;
     key.gouraud = false;
     key.texture_vram = texture.vram;
     key.pvr_format = texture.pvr_format;
@@ -474,17 +597,19 @@ void Renderer::submit_tex_rect(
     key.tex_height = texture.height;
     key.cms = texture.cms;
     key.cmt = texture.cmt;
-    ensure_list(list_type);
+    apply_blend_to_key(key, use_blend, zbuffer_enabled);
+    ensure_list(key.list_type);
     begin_batch(key);
 
     const float mx0 = map_x(x0);
     const float my0 = map_y(y0);
     const float mx1 = map_x(x1);
     const float my1 = map_y(y1);
+    const float rect_depth = zbuffer_enabled ? 1.0f : 0.0f;
 
     pvr_vertex_t vert{};
-    vert.z = 0.5f;
-    vert.argb = argb;
+    vert.z = rect_depth;
+    vert.argb = vtx_color;
     vert.oargb = 0;
 
     vert.flags = PVR_CMD_VERTEX;
@@ -514,6 +639,8 @@ void Renderer::submit_tex_rect(
     vert.v = v1;
     submit_vertex_dr(vert);
 
+    record_depth_triangle(x0, y0, rect_depth, x1, y0, rect_depth, x0, y1, rect_depth, zbuffer_enabled, use_blend.translucent);
+    record_depth_triangle(x1, y0, rect_depth, x1, y1, rect_depth, x0, y1, rect_depth, zbuffer_enabled, use_blend.translucent);
     drew_geometry_ = true;
 }
 
