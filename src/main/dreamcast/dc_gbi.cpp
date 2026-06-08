@@ -97,6 +97,7 @@ constexpr uint32_t G_MW_FOG = 0x08;
 constexpr uint32_t G_MW_LIGHTCOL = 0x0A;
 constexpr uint32_t G_MW_CLIP = 0x04;
 constexpr uint32_t G_MW_FORCEMTX = 0x0C;
+constexpr uint32_t G_MW_PERSPNORM = 0x0E;
 
 constexpr uint32_t G_MDSFT_CYCLETYPE = 20;
 constexpr uint32_t G_CYC_FILL = 3u << G_MDSFT_CYCLETYPE;
@@ -406,8 +407,11 @@ struct GbiState {
 
     TextureImage texture_to_load{};
     TileDescriptor render_tile{};
+    TileDescriptor tile1_desc{};
+    bool tile1_desc_valid = false;
     std::array<LoadedTextureSlot, 2> loaded_textures{};
     uint8_t load_tile_slot = 0;
+    uint16_t persp_norm = 0x4000;
     const uint8_t* palette = nullptr;
     std::array<uint8_t, 512> palette_buf{}; // de-swizzled TLUT (max 256 16-bit entries)
 
@@ -614,8 +618,15 @@ struct GbiState {
         out.depth = compute_pvr_depth(ndc_z);
         out.screen_z = compute_screen_z(ndc_z, vp);
         out.fog_alpha = (geometry_mode & G_FOG) != 0 ? compute_fog_alpha(out.screen_z) : 255;
-        out.tex_u = static_cast<float>((static_cast<int32_t>(v.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
-        out.tex_v = static_cast<float>((static_cast<int32_t>(v.t) * static_cast<int32_t>(texture_scale_t)) >> 16);
+        float tex_u = static_cast<float>((static_cast<int32_t>(v.s) * static_cast<int32_t>(texture_scale_s)) >> 16);
+        float tex_v = static_cast<float>((static_cast<int32_t>(v.t) * static_cast<int32_t>(texture_scale_t)) >> 16);
+        if (persp_norm > 0) {
+            const float persp_scale = static_cast<float>(persp_norm) / (tw * 65536.0f);
+            tex_u *= persp_scale;
+            tex_v *= persp_scale;
+        }
+        out.tex_u = tex_u;
+        out.tex_v = tex_v;
         if (geometry_mode & G_LIGHTING) {
             light_vertex(v, out);
         } else {
@@ -638,8 +649,23 @@ struct GbiState {
         a = static_cast<uint8_t>(rgba & 0xFF);
     }
 
+    static void unpack_argb(uint32_t argb, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) {
+        a = static_cast<uint8_t>((argb >> 24) & 0xFF);
+        r = static_cast<uint8_t>((argb >> 16) & 0xFF);
+        g = static_cast<uint8_t>((argb >> 8) & 0xFF);
+        b = static_cast<uint8_t>(argb & 0xFF);
+    }
+
+    static bool argb_translucent(uint32_t c0, uint32_t c1, uint32_t c2) {
+        return ((c0 | c1 | c2) & 0xFF000000u) != 0xFF000000u;
+    }
+
     bool combine_uses_texel0() const {
         return combiner::uses_texel0(combine_mode);
+    }
+
+    bool combine_uses_texel1() const {
+        return combiner::uses_texel1(combine_mode);
     }
 
     combiner::ColorSource to_combiner_color(const tex::TexelColor& texel) const {
@@ -666,6 +692,30 @@ struct GbiState {
 
         const int x = static_cast<int>((raw_u - render_tile.uls * 8.0f) / 32.0f);
         const int y = static_cast<int>((raw_v - render_tile.ult * 8.0f) / 32.0f);
+        return to_combiner_color(tex::sample_texel(tex, tile, palette, x, y));
+    }
+
+    combiner::ColorSource sample_texel1(float raw_u, float raw_v) const {
+        if (!loaded_textures[1].valid) {
+            return {255, 255, 255, 255};
+        }
+
+        tex::LoadedTexture tex{};
+        tex.addr = loaded_textures[1].addr;
+        tex.size_bytes = loaded_textures[1].size_bytes;
+
+        const TileDescriptor& desc = tile1_desc_valid ? tile1_desc : render_tile;
+        tex::TileState tile{};
+        tile.fmt = desc.fmt;
+        tile.siz = desc.siz;
+        tile.uls = desc.uls;
+        tile.ult = desc.ult;
+        tile.lrs = desc.lrs;
+        tile.lrt = desc.lrt;
+        tile.line_size_bytes = desc.line_size_bytes;
+
+        const int x = static_cast<int>((raw_u - desc.uls * 8.0f) / 32.0f);
+        const int y = static_cast<int>((raw_v - desc.ult * 8.0f) / 32.0f);
         return to_combiner_color(tex::sample_texel(tex, tile, palette, x, y));
     }
 
@@ -816,7 +866,7 @@ struct GbiState {
         }
 
         uint8_t r, g, b, a;
-        unpack_color(color, r, g, b, a);
+        unpack_argb(color, r, g, b, a);
         uint8_t fr, fg, fb, fa;
         unpack_color(fog_color, fr, fg, fb, fa);
         (void)fa;
@@ -827,7 +877,7 @@ struct GbiState {
             static_cast<uint8_t>(std::min(255.0f, r * visibility + fr * fog_weight)),
             static_cast<uint8_t>(std::min(255.0f, g * visibility + fg * fog_weight)),
             static_cast<uint8_t>(std::min(255.0f, b * visibility + fb * fog_weight)),
-            255
+            a
         );
     }
 
@@ -933,21 +983,26 @@ struct GbiState {
         }
 
         const bool use_texture = texture_on && loaded_textures[0].valid;
-        const bool combiner_needs_texel = use_texture && combine_mode != 0 && combine_uses_texel0();
+        const bool combiner_needs_texel0 = use_texture && combine_mode != 0 && combine_uses_texel0();
+        const bool combiner_needs_texel1 = use_texture && combine_mode != 0 && combine_uses_texel1();
+        const bool combiner_needs_texel = combiner_needs_texel0 || combiner_needs_texel1;
 
-        const combiner::ColorSource tex0 = combiner_needs_texel ? sample_texel0(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
-        const combiner::ColorSource tex1 = combiner_needs_texel ? sample_texel0(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
-        const combiner::ColorSource tex2 = combiner_needs_texel ? sample_texel0(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex0_0 = combiner_needs_texel0 ? sample_texel0(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex1_0 = combiner_needs_texel1 ? sample_texel1(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex0_1 = combiner_needs_texel0 ? sample_texel0(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex1_1 = combiner_needs_texel1 ? sample_texel1(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex0_2 = combiner_needs_texel0 ? sample_texel0(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        const combiner::ColorSource tex1_2 = combiner_needs_texel1 ? sample_texel1(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
 
-        uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0, tex0);
-        uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1, tex1);
-        uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2, tex2);
+        uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0, tex0_0, tex1_0);
+        uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1, tex0_1, tex1_1);
+        uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2, tex0_2, tex1_2);
         if (geometry_mode & G_FOG) {
             c0 = apply_fog_blend(c0, v0.fog_alpha);
             c1 = apply_fog_blend(c1, v1.fog_alpha);
             c2 = apply_fog_blend(c2, v2.fog_alpha);
         }
-        const bool translucent = ((c0 | c1 | c2) & 0xFFu) < 255u;
+        const bool translucent = argb_translucent(c0, c1, c2);
         const bool z_enabled = zbuffer_enabled();
 
         if (use_texture && !combiner_needs_texel) {
@@ -998,7 +1053,7 @@ struct GbiState {
         if (geometry_mode & G_FOG) {
             vtx_color = apply_fog_blend(vtx_color, compute_fog_alpha(0.0f));
         }
-        const bool translucent = (vtx_color & 0xFFu) < 255u;
+        const bool translucent = (vtx_color & 0xFF000000u) != 0xFF000000u;
 
         renderer->submit_tex_rect(
             ulx, uly, lrx, lry,
@@ -1152,6 +1207,9 @@ struct GbiState {
             break;
         case G_MW_FOG:
             s.fog_factor = dl->w1;
+            break;
+        case G_MW_PERSPNORM:
+            s.persp_norm = static_cast<uint16_t>(dl->w1);
             break;
         default:
             break;
@@ -1493,12 +1551,19 @@ struct GbiState {
 
     static void dl_settile(GbiState& s, DisplayList*& dl) {
         const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
+        TileDescriptor* desc = nullptr;
         if (tile == G_TX_RENDERTILE) {
-            s.render_tile.fmt = static_cast<uint8_t>(dl->p0(21, 3));
-            s.render_tile.siz = static_cast<uint8_t>(dl->p0(19, 2));
-            s.render_tile.line_size_bytes = static_cast<uint16_t>(dl->p0(9, 9) * 8);
-            s.render_tile.cms = static_cast<uint8_t>(dl->p1(8, 2));
-            s.render_tile.cmt = static_cast<uint8_t>(dl->p1(18, 2));
+            desc = &s.render_tile;
+        } else if (tile == 1) {
+            desc = &s.tile1_desc;
+            s.tile1_desc_valid = true;
+        }
+        if (desc != nullptr) {
+            desc->fmt = static_cast<uint8_t>(dl->p0(21, 3));
+            desc->siz = static_cast<uint8_t>(dl->p0(19, 2));
+            desc->line_size_bytes = static_cast<uint16_t>(dl->p0(9, 9) * 8);
+            desc->cms = static_cast<uint8_t>(dl->p1(8, 2));
+            desc->cmt = static_cast<uint8_t>(dl->p1(18, 2));
             s.texture_changed = true;
         }
         if (tile == G_TX_LOADTILE) {
@@ -1508,11 +1573,18 @@ struct GbiState {
 
     static void dl_settilesize(GbiState& s, DisplayList*& dl) {
         const uint8_t tile = static_cast<uint8_t>(dl->p1(24, 3));
+        TileDescriptor* desc = nullptr;
         if (tile == G_TX_RENDERTILE) {
-            s.render_tile.uls = static_cast<uint16_t>(dl->p0(12, 12));
-            s.render_tile.ult = static_cast<uint16_t>(dl->p0(0, 12));
-            s.render_tile.lrs = static_cast<uint16_t>(dl->p1(12, 12));
-            s.render_tile.lrt = static_cast<uint16_t>(dl->p1(0, 12));
+            desc = &s.render_tile;
+        } else if (tile == 1) {
+            desc = &s.tile1_desc;
+            s.tile1_desc_valid = true;
+        }
+        if (desc != nullptr) {
+            desc->uls = static_cast<uint16_t>(dl->p0(12, 12));
+            desc->ult = static_cast<uint16_t>(dl->p0(0, 12));
+            desc->lrs = static_cast<uint16_t>(dl->p1(12, 12));
+            desc->lrt = static_cast<uint16_t>(dl->p1(0, 12));
             s.texture_changed = true;
         }
     }
@@ -1542,11 +1614,12 @@ struct GbiState {
 
         const uint32_t size_bytes = (static_cast<uint32_t>(lrs) + 1u) << word_size_shift;
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
-        s.tmem.load_block(s.rdram, s.texture_to_load.offset, s.tmem_offset, size_bytes);
-        s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
+        const uint32_t dest_offset = s.tmem_offset % tmem::TMEM_SIZE;
+        s.tmem.load_block(s.rdram, s.texture_to_load.offset, dest_offset, size_bytes);
+        s.loaded_textures[slot].addr = s.tmem.data() + dest_offset;
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
-        s.loaded_textures[0] = s.loaded_textures[slot];
+        s.tmem_offset = (dest_offset + size_bytes + 7u) & ~7u;
         s.texture_changed = true;
     }
 
@@ -1583,17 +1656,22 @@ struct GbiState {
         const uint32_t size_bytes = width_bytes * height_tiles;
 
         const uint8_t slot = std::min<uint8_t>(s.load_tile_slot, 1);
+        const uint32_t dest_offset = s.tmem_offset % tmem::TMEM_SIZE;
         const uint32_t src_stride = std::max<uint32_t>(s.texture_to_load.width, 1u) << word_size_shift;
-        s.tmem.load_tile(s.rdram, s.texture_to_load.offset, src_stride, s.tmem_offset, width_bytes, height_tiles);
-        s.loaded_textures[slot].addr = s.tmem.data() + (s.tmem_offset % tmem::TMEM_SIZE);
+        s.tmem.load_tile(s.rdram, s.texture_to_load.offset, src_stride, dest_offset, width_bytes, height_tiles);
+        s.loaded_textures[slot].addr = s.tmem.data() + dest_offset;
         s.loaded_textures[slot].size_bytes = size_bytes;
         s.loaded_textures[slot].valid = true;
-        s.loaded_textures[0] = s.loaded_textures[slot];
+        s.tmem_offset = (dest_offset + size_bytes + 7u) & ~7u;
 
-        s.render_tile.uls = uls;
-        s.render_tile.ult = ult;
-        s.render_tile.lrs = lrs;
-        s.render_tile.lrt = lrt;
+        TileDescriptor& desc = (slot == 0) ? s.render_tile : s.tile1_desc;
+        if (slot == 1) {
+            s.tile1_desc_valid = true;
+        }
+        desc.uls = uls;
+        desc.ult = ult;
+        desc.lrs = lrs;
+        desc.lrt = lrt;
         s.texture_changed = true;
     }
 
@@ -1863,6 +1941,7 @@ struct GbiState {
         gbi_dispatch[G_MTX] = dl_mtx;
         gbi_dispatch[G_POPMTX] = dl_popmtx;
         gbi_dispatch[G_MOVEWORD] = dl_moveword;
+        gbi_dispatch[G_DMA_IO] = dl_moveword;
         gbi_dispatch[G_MOVEMEM] = dl_movemem;
         gbi_dispatch[G_GEOMETRYMODE] = dl_geometrymode;
         gbi_dispatch[G_TEXTURE] = dl_texture;
@@ -1926,7 +2005,8 @@ struct GbiState {
 
             if (state.extended_opcode != 0 && opcode == state.extended_opcode) {
                 dl_extended(state, dl);
-            } else if (state.s2dex_active && opcode <= G_LINE3D) {
+            } else if (state.s2dex_active
+                && (opcode == G_S2DEX_BG_RECT_COPY || opcode == G_S2DEX_OBJ_RECTANGLE)) {
                 dl_s2dex(state, dl);
             } else {
                 gbi_dispatch[opcode](state, dl);

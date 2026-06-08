@@ -28,10 +28,8 @@ constexpr uint8_t G_TX_MIRROR = 0x1;
 constexpr uint8_t G_TX_CLAMP = 0x2;
 
 bool needs_translucent(uint32_t argb0, uint32_t argb1, uint32_t argb2) {
-    const uint32_t a0 = argb0 & 0xFF;
-    const uint32_t a1 = argb1 & 0xFF;
-    const uint32_t a2 = argb2 & 0xFF;
-    return (a0 < 255u) || (a1 < 255u) || (a2 < 255u);
+    // Combiner output is ARGB (alpha in bits 24-31).
+    return ((argb0 | argb1 | argb2) & 0xFF000000u) != 0xFF000000u;
 }
 
 } // anonymous namespace
@@ -426,7 +424,7 @@ void Renderer::submit_fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t l
     const float x1 = static_cast<float>(lrx) / 4.0f;
     const float y1 = static_cast<float>(lry) / 4.0f;
 
-    const bool translucent = (argb & 0xFFu) < 255u;
+    const bool translucent = (argb & 0xFF000000u) != 0xFF000000u;
     const int list_type = translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
 
     BatchKey key{};
@@ -501,7 +499,7 @@ void Renderer::submit_tex_rect(
     const float u1 = lrs / tex_w;
     const float v1 = lrt / tex_h;
 
-    const bool use_translucent = translucent || ((argb & 0xFFu) < 255u);
+    const bool use_translucent = translucent || ((argb & 0xFF000000u) != 0xFF000000u);
     const int list_type = use_translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
 
     BatchKey key{};

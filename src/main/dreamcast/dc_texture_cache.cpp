@@ -401,21 +401,24 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
     pvr_txr_set_stride(stride);
     pvr_txr_load(pixels.data(), vram, padded_bytes);
 
-    if (entry_count_ < MAX_ENTRIES) {
-        Entry& entry = entries_[entry_count_++];
-        entry.addr = tex.addr;
-        entry.fmt = tile.fmt;
-        entry.siz = tile.siz;
-        entry.hash = hash;
-        entry.vram = vram;
-        entry.width = static_cast<uint16_t>(width);
-        entry.height = static_cast<uint16_t>(height);
-        entry.stride = static_cast<uint16_t>(stride);
-        entry.pvr_format = surface.pvr_format;
-        entry.bytes = padded_bytes;
-        entry.last_used = current_frame_;
-        vram_used_ += padded_bytes;
+    if (entry_count_ >= MAX_ENTRIES) {
+        pvr_mem_free(vram);
+        return surface;
     }
+
+    Entry& entry = entries_[entry_count_++];
+    entry.addr = tex.addr;
+    entry.fmt = tile.fmt;
+    entry.siz = tile.siz;
+    entry.hash = hash;
+    entry.vram = vram;
+    entry.width = static_cast<uint16_t>(width);
+    entry.height = static_cast<uint16_t>(height);
+    entry.stride = static_cast<uint16_t>(stride);
+    entry.pvr_format = surface.pvr_format;
+    entry.bytes = padded_bytes;
+    entry.last_used = current_frame_;
+    vram_used_ += padded_bytes;
 
     surface.vram = vram;
     surface.width = static_cast<uint16_t>(width);
