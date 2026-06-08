@@ -202,7 +202,7 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
         break;
     case G_IM_FMT_IA:
         if (tile.siz == G_IM_SIZ_4b) {
-            for (size_t i = 0; i < pixel_count; i++) {
+            for (size_t i = 0; i < pixel_count && (i / 2) < tex.size_bytes; i++) {
                 const uint8_t byte = tex.addr[i / 2];
                 const uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xF;
                 const uint8_t intensity = scale_3_8(static_cast<uint8_t>(part >> 1));
@@ -228,7 +228,7 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
         break;
     case G_IM_FMT_I:
         if (tile.siz == G_IM_SIZ_4b) {
-            for (size_t i = 0; i < pixel_count; i++) {
+            for (size_t i = 0; i < pixel_count && (i / 2) < tex.size_bytes; i++) {
                 const uint8_t byte = tex.addr[i / 2];
                 const uint8_t part = (byte >> (4 - (i % 2) * 4)) & 0xF;
                 const uint8_t intensity = scale_4_8(part);
@@ -248,7 +248,7 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
             return surface;
         }
         if (tile.siz == G_IM_SIZ_4b) {
-            for (size_t i = 0; i < pixel_count; i++) {
+            for (size_t i = 0; i < pixel_count && (i / 2) < tex.size_bytes; i++) {
                 const uint8_t byte = tex.addr[i / 2];
                 const uint8_t idx = (byte >> (4 - (i % 2) * 4)) & 0xF;
                 const uint16_t col16 = read_be16(palette + idx * 2);

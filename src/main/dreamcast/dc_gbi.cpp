@@ -83,6 +83,7 @@ constexpr uint8_t G_MTX_PUSH = 0x01;
 constexpr uint8_t G_MTX_MODELVIEW = 0x00;
 
 constexpr uint32_t G_SHADE = 0x00000004;
+constexpr uint32_t G_LIGHTING = 0x00020000;
 constexpr uint32_t G_CULL_FRONT = 0x00000200;
 constexpr uint32_t G_CULL_BACK = 0x00000400;
 constexpr uint32_t G_CULL_BOTH = 0x00000600;
@@ -633,6 +634,7 @@ struct GbiState {
         }
 
         const bool use_shade = (geometry_mode & G_SHADE) != 0;
+        const bool lighting = (geometry_mode & G_LIGHTING) != 0;
         uint8_t pr, pg, pb, pa;
         unpack_color(prim_color, pr, pg, pb, pa);
 
@@ -640,7 +642,15 @@ struct GbiState {
         uint8_t r1, g1, b1, a1;
         uint8_t r2, g2, b2, a2;
 
-        if (use_shade) {
+        if (use_shade && lighting) {
+            // Under G_LIGHTING the vertex RGB bytes hold signed normals, not a
+            // shade color. Per-light diffuse/ambient shading is not yet
+            // implemented, so use full-bright white (keeping per-vertex alpha)
+            // rather than rendering the raw normals as colors.
+            r0 = g0 = b0 = 255; a0 = v0.a;
+            r1 = g1 = b1 = 255; a1 = v1.a;
+            r2 = g2 = b2 = 255; a2 = v2.a;
+        } else if (use_shade) {
             r0 = v0.r; g0 = v0.g; b0 = v0.b; a0 = v0.a;
             r1 = v1.r; g1 = v1.g; b1 = v1.b; a1 = v1.a;
             r2 = v2.r; g2 = v2.g; b2 = v2.b; a2 = v2.a;
