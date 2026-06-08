@@ -1162,6 +1162,23 @@ struct GbiState {
     using DlHandler = void (*)(GbiState&, DisplayList*&);
 
     static void dl_noop(GbiState&, DisplayList*&) {}
+
+    // Default handler for opcodes with no registered implementation. Unlike
+    // dl_noop (used for genuine no-ops such as G_NOOP and the RDP sync
+    // commands), this records the opcode and logs it once so a hardware
+    // play-test surfaces missing GBI coverage instead of silently dropping
+    // geometry or render state.
+    static inline bool unimpl_logged[256]{};
+    static void dl_unimplemented(GbiState&, DisplayList*& dl) {
+        const uint8_t opcode = static_cast<uint8_t>(dl->w0 >> 24);
+        if (!unimpl_logged[opcode]) {
+            unimpl_logged[opcode] = true;
+            fprintf(stderr,
+                    "[DC GBI] Unimplemented opcode 0x%02X (w0=0x%08X w1=0x%08X)\n",
+                    opcode, dl->w0, dl->w1);
+        }
+    }
+
     static void dl_enddl(GbiState& s, DisplayList*& dl) {
         if (!s.dl_stack.empty()) {
             dl = s.dl_stack.back();
@@ -1925,7 +1942,7 @@ struct GbiState {
         initialized = true;
 
         for (auto& handler : gbi_dispatch) {
-            handler = dl_noop;
+            handler = dl_unimplemented;
         }
 
         gbi_dispatch[G_NOOP] = dl_noop;

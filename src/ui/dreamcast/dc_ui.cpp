@@ -24,6 +24,9 @@
 #include <dc/biosfont.h>
 
 #include "recomp_ui.h"
+#include "recomp_input.h"
+#include "zelda_config.h"
+#include "zelda_sound.h"
 #include "dreamcast_platform.h"
 
 namespace {
@@ -36,6 +39,12 @@ struct MenuEntry {
     std::string label;
     std::function<void()> action;
     bool enabled;
+    // Option entries: when value_fn is set the entry renders as
+    // "Label: < value >" and D-pad left/right invoke adjust_fn(-1 / +1) to
+    // change the underlying setting. Plain entries leave both empty and use
+    // `action` (fired on A / Start) instead.
+    std::function<std::string()> value_fn;
+    std::function<void(int)> adjust_fn;
 };
 
 struct MenuState {
@@ -137,6 +146,143 @@ ContextId get_config_sub_menu_context_id() {
 // ── Config tab stubs ─────────────────────────────────────────────────
 
 void set_config_tab(ConfigTab /*tab*/) {}
+
+// ── In-game config menu ──────────────────────────────────────────────
+// A minimal, controller-driven editor for the settings that already persist
+// to the VMU. Built from the zelda64 / recomp config getters and setters so it
+// stays in sync with whatever config.cpp serialises. Dismissing the menu saves
+// the config so changes survive a power cycle.
+
+namespace {
+
+// Clamp an integer setting to [0, 100] adjusted in fixed steps.
+int adjust_percent(int value, int delta, int step) {
+    value += delta * step;
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
+    return value;
+}
+
+// Cycle an enum stored as an int through [0, count) with wraparound.
+int cycle_enum(int value, int delta, int count) {
+    value = (value + delta) % count;
+    if (value < 0) value += count;
+    return value;
+}
+
+const char* on_off(bool v) { return v ? "On" : "Off"; }
+
+// Build one option entry from a getter/setter pair.
+template <typename Get, typename Set>
+MenuEntry make_enum_option(std::string label, Get get, Set set,
+                           int count, const char* const* names) {
+    MenuEntry e;
+    e.label = std::move(label);
+    e.enabled = true;
+    e.value_fn = [get, names]() { return std::string(names[get()]); };
+    e.adjust_fn = [get, set, count](int delta) {
+        set(cycle_enum(get(), delta, count));
+    };
+    return e;
+}
+
+} // anonymous namespace
+
+void open_config_menu() {
+    using namespace zelda64;
+
+    current_menu.title = "Options";
+    current_menu.entries.clear();
+    current_menu.selected_index = 0;
+
+    auto& e = current_menu.entries;
+
+    // Volume (0–100 in steps of 10).
+    {
+        MenuEntry m;
+        m.label = "Main Volume";
+        m.enabled = true;
+        m.value_fn = []() { return std::to_string(get_main_volume()); };
+        m.adjust_fn = [](int d) { set_main_volume(adjust_percent(get_main_volume(), d, 10)); };
+        e.push_back(std::move(m));
+    }
+    {
+        MenuEntry m;
+        m.label = "Music Volume";
+        m.enabled = true;
+        m.value_fn = []() { return std::to_string(get_bgm_volume()); };
+        m.adjust_fn = [](int d) { set_bgm_volume(adjust_percent(get_bgm_volume(), d, 10)); };
+        e.push_back(std::move(m));
+    }
+    {
+        MenuEntry m;
+        m.label = "Low-Health Beeps";
+        m.enabled = true;
+        m.value_fn = []() { return std::string(on_off(get_low_health_beeps_enabled())); };
+        m.adjust_fn = [](int) { set_low_health_beeps_enabled(!get_low_health_beeps_enabled()); };
+        e.push_back(std::move(m));
+    }
+
+    // Gameplay options backed by enums.
+    static const char* targeting_names[] = {"Switch", "Hold"};
+    e.push_back(make_enum_option(
+        "Targeting",
+        []() { return static_cast<int>(get_targeting_mode()); },
+        [](int v) { set_targeting_mode(static_cast<TargetingMode>(v)); },
+        static_cast<int>(TargetingMode::OptionCount), targeting_names));
+
+    static const char* autosave_names[] = {"On", "Off"};
+    e.push_back(make_enum_option(
+        "Autosave",
+        []() { return static_cast<int>(get_autosave_mode()); },
+        [](int v) { set_autosave_mode(static_cast<AutosaveMode>(v)); },
+        static_cast<int>(AutosaveMode::OptionCount), autosave_names));
+
+    static const char* invert_names[] = {"None", "X", "Y", "Both"};
+    e.push_back(make_enum_option(
+        "Camera Invert",
+        []() { return static_cast<int>(get_camera_invert_mode()); },
+        [](int v) { set_camera_invert_mode(static_cast<CameraInvertMode>(v)); },
+        static_cast<int>(CameraInvertMode::OptionCount), invert_names));
+
+    // Controller options (recomp namespace getters/setters).
+    {
+        MenuEntry m;
+        m.label = "Rumble Strength";
+        m.enabled = true;
+        m.value_fn = []() { return std::to_string(recomp::get_rumble_strength()); };
+        m.adjust_fn = [](int d) {
+            recomp::set_rumble_strength(adjust_percent(recomp::get_rumble_strength(), d, 10));
+        };
+        e.push_back(std::move(m));
+    }
+    {
+        MenuEntry m;
+        m.label = "Stick Deadzone";
+        m.enabled = true;
+        m.value_fn = []() { return std::to_string(recomp::get_joystick_deadzone()); };
+        m.adjust_fn = [](int d) {
+            recomp::set_joystick_deadzone(adjust_percent(recomp::get_joystick_deadzone(), d, 5));
+        };
+        e.push_back(std::move(m));
+    }
+
+    // Closing the menu (Back or B) persists everything to the VMU.
+    auto save_and_close = []() {
+        zelda64::save_config();
+        current_menu.visible = false;
+    };
+    {
+        MenuEntry m;
+        m.label = "Back (save)";
+        m.enabled = true;
+        m.action = save_and_close;
+        e.push_back(std::move(m));
+    }
+
+    current_menu.cancel_action = save_and_close;
+    current_menu.visible = true;
+}
 
 int config_tab_to_index(ConfigTab tab) {
     return static_cast<int>(tab);
@@ -351,7 +497,15 @@ void render_menu_overlay() {
 
         char prefix = (static_cast<int>(i) == current_menu.selected_index) ? '>' : ' ';
         char line[128];
-        snprintf(line, sizeof(line), "%c %s", prefix, current_menu.entries[i].label.c_str());
+        const MenuEntry& entry = current_menu.entries[i];
+        if (entry.value_fn) {
+            // Option entry: show the adjustable value framed with arrows so the
+            // player knows left/right changes it.
+            snprintf(line, sizeof(line), "%c %s: < %s >", prefix,
+                     entry.label.c_str(), entry.value_fn().c_str());
+        } else {
+            snprintf(line, sizeof(line), "%c %s", prefix, entry.label.c_str());
+        }
         draw_bios_text(MENU_PADDING, y, color, line);
         y += FONT_CHAR_H + MENU_ITEM_SPACING;
     }
@@ -376,15 +530,32 @@ void handle_menu_input(uint32_t buttons_pressed) {
         }
     }
 
-    // A / Start → confirm selection. Snapshot the action first: invoking it may
-    // mutate (or replace) current_menu, which would invalidate the reference.
+    // Left / right adjust the value of an option entry (volume, toggles, …).
+    if (buttons_pressed & (CONT_DPAD_LEFT | CONT_DPAD_RIGHT)) {
+        const int idx = current_menu.selected_index;
+        if (idx >= 0 && idx < static_cast<int>(current_menu.entries.size())) {
+            const MenuEntry& entry = current_menu.entries[idx];
+            if (entry.enabled && entry.adjust_fn) {
+                entry.adjust_fn((buttons_pressed & CONT_DPAD_RIGHT) ? +1 : -1);
+            }
+        }
+    }
+
+    // A / Start → confirm selection. Snapshot the callbacks first: invoking
+    // them may mutate (or replace) current_menu, invalidating the reference.
     if (buttons_pressed & (CONT_A | CONT_START)) {
         const int idx = current_menu.selected_index;
         if (idx >= 0 && idx < static_cast<int>(current_menu.entries.size())) {
             const MenuEntry& entry = current_menu.entries[idx];
-            if (entry.enabled && entry.action) {
-                auto action = entry.action;
-                action();
+            if (entry.enabled) {
+                if (entry.action) {
+                    auto action = entry.action;
+                    action();
+                } else if (entry.adjust_fn) {
+                    // No discrete action: A cycles the option forward, matching
+                    // the right-arrow behavior for one-handed adjustment.
+                    entry.adjust_fn(+1);
+                }
             }
         }
         return;

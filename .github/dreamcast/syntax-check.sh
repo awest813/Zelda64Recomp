@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+#
+# Dreamcast source syntax check.
+#
+# A full Dreamcast link is impossible in CI because the executable depends on
+# the per-ROM recompiler output (RecompiledFuncs/), which is generated from a
+# copyrighted ROM that is not in the repository. This script instead compiles
+# every Dreamcast-specific translation unit with the KallistiOS SH-4 toolchain
+# using -fsyntax-only, which catches the kind of compile regressions that the
+# PC CI cannot (the DC sources are guarded behind #ifdef DREAMCAST and are
+# never built by the PC matrix).
+#
+# It can be run locally inside a KOS toolchain environment:
+#
+#   source /opt/toolchains/dc/kos/environ.sh
+#   .github/dreamcast/syntax-check.sh
+#
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$repo_root"
+
+# ── Locate the KOS environment ───────────────────────────────────────
+# environ.sh exports KOS_CC_BASE / KOS_CC_PREFIX / KOS_CFLAGS / KOS_INC_PATHS
+# and (in recent KOS) the kos-c++ wrapper. Source it if the caller hasn't.
+if [[ -z "${KOS_BASE:-}" ]]; then
+    for env_sh in /opt/toolchains/dc/kos/environ.sh "${KOS_BASE:-}/environ.sh"; do
+        if [[ -f "$env_sh" ]]; then
+            # shellcheck disable=SC1090
+            source "$env_sh"
+            break
+        fi
+    done
+fi
+
+if [[ -z "${KOS_BASE:-}" ]]; then
+    echo "error: KallistiOS environment not found (KOS_BASE unset)." >&2
+    echo "       Source the KOS environ.sh before running this script." >&2
+    exit 1
+fi
+
+# ── Pick a C++ compiler ──────────────────────────────────────────────
+# Prefer the kos-c++ wrapper (it folds in the KOS include paths and arch
+# flags). Fall back to invoking the raw cross-g++ with the exported KOS flags.
+if command -v kos-c++ >/dev/null 2>&1; then
+    CXX=(kos-c++)
+else
+    CXX=("${KOS_CC_BASE}/bin/${KOS_CC_PREFIX:-sh-elf-}g++" ${KOS_CFLAGS:-} ${KOS_CPPFLAGS:-} ${KOS_INC_PATHS:-})
+fi
+
+# ── Project include paths (mirrors CMakeLists.txt DREAMCAST target) ──
+includes=(
+    -Iinclude
+    -Ilib/N64ModernRuntime/ultramodern/include
+    -Ilib/N64ModernRuntime/librecomp/include
+    -Ilib/N64ModernRuntime/N64Recomp/include
+    -Ilib/concurrentqueue
+    -Ilib/SlotMap
+)
+
+# Flags matching the DREAMCAST build (see CMakeLists.txt / dreamcast.cmake).
+flags=(
+    -std=gnu++20
+    -DDREAMCAST
+    -fno-strict-aliasing
+    -fsyntax-only
+)
+
+# ── Collect Dreamcast translation units ──────────────────────────────
+mapfile -t sources < <(find \
+    src/main/dreamcast \
+    src/game/dreamcast \
+    src/ui/dreamcast \
+    -name '*.cpp' | sort)
+
+if [[ ${#sources[@]} -eq 0 ]]; then
+    echo "error: no Dreamcast sources found." >&2
+    exit 1
+fi
+
+echo "Syntax-checking ${#sources[@]} Dreamcast source(s) with the KOS SH-4 toolchain..."
+echo
+
+failures=0
+for src in "${sources[@]}"; do
+    printf '  %-48s ' "$src"
+    if "${CXX[@]}" "${flags[@]}" "${includes[@]}" "$src" 2> /tmp/dc_syntax_err; then
+        echo "ok"
+    else
+        echo "FAILED"
+        sed 's/^/      /' /tmp/dc_syntax_err
+        failures=$((failures + 1))
+    fi
+done
+
+echo
+if [[ $failures -ne 0 ]]; then
+    echo "Dreamcast syntax check failed for $failures file(s)." >&2
+    exit 1
+fi
+echo "All Dreamcast sources compiled cleanly."
