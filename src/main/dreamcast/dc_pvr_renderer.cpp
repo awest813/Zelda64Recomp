@@ -123,11 +123,13 @@ void Renderer::close_list() {
 }
 
 void Renderer::flush_batch() {
-    if (!batch_hdr_valid_ || !list_open_) {
+    // The polygon header is submitted up-front in begin_batch(), so flushing a
+    // batch only needs to close out any pending direct-render vertices and mark
+    // the batch as inactive. The next begin_batch() will emit a fresh header.
+    if (!batch_hdr_valid_) {
         return;
     }
     end_dr();
-    pvr_prim(&batch_hdr_, sizeof(pvr_poly_hdr_t));
     batch_hdr_valid_ = false;
 }
 
@@ -192,6 +194,12 @@ void Renderer::begin_batch(const BatchKey& key) {
     }
 
     pvr_poly_compile(&batch_hdr_, &cxt);
+
+    // Emit the header into the TA input stream now, before any vertices for this
+    // batch are submitted. The PVR processes the list sequentially, so vertices
+    // must always follow their governing polygon header.
+    end_dr();
+    pvr_prim(&batch_hdr_, sizeof(pvr_poly_hdr_t));
     batch_hdr_valid_ = true;
 }
 
