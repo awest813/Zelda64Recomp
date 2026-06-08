@@ -318,16 +318,18 @@ void PVRContext::send_dl(const OSTask* task) {
 
 void PVRContext::update_screen() {
     if (pvr_renderer_.scene_active()) {
+        recompui::render_menu_pvr_background();
         pvr_renderer_.end_frame();
     } else {
         // Fallback: no Gfx tasks ran this frame; present VI framebuffer if set.
         pvr_wait_ready();
         pvr_scene_begin();
         render_framebuffer_to_screen();
+        recompui::render_menu_pvr_background();
         pvr_scene_finish();
     }
 
-    // Draw the menu overlay (if any) on top of the presented frame.
+    // BIOS-font labels are composited on the framebuffer after the PVR scene.
     recompui::render_menu_overlay();
 
     frame_index_++;
