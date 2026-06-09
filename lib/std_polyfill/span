@@ -1,15 +1,12 @@
 // std::span polyfill for toolchains whose libstdc++ predates <span> (e.g. KOS GCC 9).
-// When the standard header exists, forward to it via include_next.
 #pragma once
 
-#if defined(__has_include)
-#  if __has_include(<span>)
-#    include_next <span>
-#  else
-#    define TCB_SPAN_NAMESPACE_NAME std
-#    define TCB_SPAN_NO_CONTRACT_CHECKING
-#    include "tcb/span.hpp"
-#  endif
+#if defined(__GNUC__) && (__GNUC__ < 10)
+#  define TCB_SPAN_NAMESPACE_NAME std
+#  define TCB_SPAN_NO_CONTRACT_CHECKING
+#  include "tcb/span.hpp"
+#elif defined(__has_include) && __has_include(<span>)
+#  include <span>
 #else
 #  define TCB_SPAN_NAMESPACE_NAME std
 #  define TCB_SPAN_NO_CONTRACT_CHECKING

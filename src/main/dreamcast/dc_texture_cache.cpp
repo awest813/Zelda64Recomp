@@ -76,7 +76,7 @@ uint32_t texture_width(const LoadedTexture& tex, const TileState& tile) {
 }
 
 uint32_t texture_height(const LoadedTexture& tex, const TileState& tile) {
-    const uint32_t width = std::max(texture_width(tex, tile), 1u);
+    const uint32_t width = std::max<uint32_t>(texture_width(tex, tile), 1u);
     return tex.size_bytes / width;
 }
 
@@ -118,8 +118,8 @@ TexelColor sample_texel(
         return out;
     }
 
-    uint32_t width = std::max(texture_width(tex, tile), 1u);
-    uint32_t height = std::max(texture_height(tex, tile), 1u);
+    uint32_t width = std::max<uint32_t>(texture_width(tex, tile), 1u);
+    uint32_t height = std::max<uint32_t>(texture_height(tex, tile), 1u);
     const uint32_t tile_w = std::max<uint32_t>((tile.lrs - tile.uls + 4) / 4, 1);
     const uint32_t tile_h = std::max<uint32_t>((tile.lrt - tile.ult + 4) / 4, 1);
     if (tile.lrs >= tile.uls && tile.lrt >= tile.ult) {
@@ -262,8 +262,8 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
         }
     }
 
-    uint32_t width = std::max(texture_width(tex, tile), 1u);
-    uint32_t height = std::max(texture_height(tex, tile), 1u);
+    uint32_t width = std::max<uint32_t>(texture_width(tex, tile), 1u);
+    uint32_t height = std::max<uint32_t>(texture_height(tex, tile), 1u);
 
     // Crop to the active render tile when tile bounds are set.
     const uint32_t tile_w = std::max<uint32_t>((tile.lrs - tile.uls + 4) / 4, 1);

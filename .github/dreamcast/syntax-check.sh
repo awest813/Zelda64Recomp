@@ -89,10 +89,18 @@ fi
 # Flags matching the DREAMCAST build (see CMakeLists.txt / dreamcast.cmake).
 flags=(
     "$cxx_std"
+    -D_arch_dreamcast
+    -D_arch_sub_pristine
     -DDREAMCAST
     -fno-strict-aliasing
     -fsyntax-only
 )
+
+# Arch/cpu flags exported by environ.sh (-ml, -m4-single-only, …).
+if [[ -n "${KOS_CFLAGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  flags+=(${KOS_CFLAGS})
+fi
 
 # ── Collect Dreamcast translation units ──────────────────────────────
 mapfile -t sources < <(find \
