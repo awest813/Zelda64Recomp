@@ -25,6 +25,7 @@
 #include <dc/vmu_pkg.h>
 #include <dc/maple.h>
 #include <dc/maple/vmu.h>
+#include <dc/maple/memcard.h>
 
 #include <cstddef>
 

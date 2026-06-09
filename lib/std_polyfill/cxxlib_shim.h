@@ -14,6 +14,10 @@ using ::strtof;
 using ::strtold;
 using ::strtoull;
 using ::strtoll;
+using ::lround;
+inline unsigned long long stoull(const std::string& str, std::size_t* idx = nullptr, int base = 10) {
+    return ::strtoull(str.c_str(), idx != nullptr ? reinterpret_cast<char**>(idx) : nullptr, base);
+}
 } // namespace std
 
 #if defined(__GNUC__) && (__GNUC__ < 10)
@@ -47,5 +51,25 @@ inline std::string to_string(long double value) {
     std::snprintf(buf, sizeof(buf), "%Lg", value);
     return buf;
 }
+// Minimal threading primitives for syntax-check / bring-up when libstdc++ omits them.
+class mutex {
+public:
+    void lock() {}
+    void unlock() {}
+};
+template <typename Mutex>
+class lock_guard {
+public:
+    explicit lock_guard(Mutex& m) : m_(m) { m_.lock(); }
+    ~lock_guard() { m_.unlock(); }
+private:
+    Mutex& m_;
+};
+class thread {
+public:
+    template <typename F>
+    explicit thread(F&&) {}
+    void detach() {}
+};
 } // namespace std
 #endif
