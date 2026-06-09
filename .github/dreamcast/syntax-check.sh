@@ -20,6 +20,13 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
+# KOS CI uses GCC 9, which lacks C++20 operator<=> and a DREAMCAST WindowHandle
+# typedef in ultramodern. Apply the small compatibility patch before compiling.
+patch_file="$repo_root/.github/dreamcast/ultramodern-gcc9.patch"
+if [[ -f "$patch_file" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$patch_file" || true
+fi
+
 # ── Locate the KOS environment ───────────────────────────────────────
 # environ.sh exports KOS_CC_BASE / KOS_CC_PREFIX / KOS_CFLAGS / KOS_INC_PATHS
 # and (in recent KOS) the kos-c++ wrapper. Source it if the caller hasn't.

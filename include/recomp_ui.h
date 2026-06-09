@@ -22,7 +22,11 @@ namespace recompui {
     // Minimal ContextId for Dreamcast: wraps a plain slot index.
     struct ContextId {
         uint32_t slot_id = 0;
+#if defined(__GNUC__) && (__GNUC__ < 10)
+        bool operator==(const ContextId& rhs) const { return slot_id == rhs.slot_id; }
+#else
         auto operator<=>(const ContextId& rhs) const = default;
+#endif
     };
 
     enum class ConfigTab {

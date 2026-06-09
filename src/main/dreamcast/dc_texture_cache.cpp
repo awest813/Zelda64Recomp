@@ -4,6 +4,11 @@
 
 #include "dc_texture_cache.h"
 
+// Older KOS headers name this flag PVR_TXRFMT_STRIDE.
+#ifndef PVR_TXRFMT_X32_STRIDE
+#define PVR_TXRFMT_X32_STRIDE PVR_TXRFMT_STRIDE
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstring>

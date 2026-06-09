@@ -129,6 +129,7 @@ private:
     void begin_dr();
     void end_dr();
     void submit_vertex_dr(const pvr_vertex_t& vert);
+    void apply_blend_to_key(BatchKey& key, const rdp::BlendState& blend, bool zbuffer_enabled);
     void apply_wrap_modes(pvr_poly_cxt_t& cxt, uint8_t cms, uint8_t cmt) const;
 
     float map_x(float n64_x) const;
