@@ -89,7 +89,10 @@ endforeach()
 set(CMAKE_C_FLAGS_INIT   "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
 # Older KOS GCC (9/10) names C++20 -std=gnu++2a; newer toolchains accept
 # -std=gnu++20. Use gnu++2a here so cross-builds work on both.
-set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS} -std=gnu++2a")
+get_filename_component(DC_CXXLIB_SHIM
+    "${CMAKE_CURRENT_LIST_DIR}/../../lib/std_polyfill/cxxlib_shim.h"
+    ABSOLUTE)
+set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS} -std=gnu++2a -include ${DC_CXXLIB_SHIM}")
 set(CMAKE_ASM_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
 
 # ── Linker flags ─────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ extern "C" {
 }
 #elif defined(__MACH__)
 #include <mach/mach.h>
-#elif defined(__unix__)
+#elif defined(__unix__) || defined(DREAMCAST)
 #include <semaphore.h>
 
 #if defined(__GLIBC_PREREQ) && defined(_GNU_SOURCE)

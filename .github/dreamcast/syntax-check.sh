@@ -101,6 +101,7 @@ flags=(
     -DDREAMCAST
     -fno-strict-aliasing
     -fsyntax-only
+    -include "$repo_root/lib/std_polyfill/cxxlib_shim.h"
 )
 
 # Arch/cpu flags exported by environ.sh (-ml, -m4-single-only, …).
