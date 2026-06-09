@@ -253,6 +253,50 @@ public:
 		}
 	}
 };
+#elif defined(DREAMCAST)
+//---------------------------------------------------------
+// Semaphore (Dreamcast / KOS — no POSIX semaphores)
+//---------------------------------------------------------
+class Semaphore
+{
+private:
+	std::atomic<int> m_count;
+
+	Semaphore(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
+	Semaphore& operator=(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
+
+public:
+	Semaphore(int initialCount = 0) : m_count(initialCount) { assert(initialCount >= 0); }
+
+	bool wait()
+	{
+		int expected;
+		do {
+			expected = m_count.load(std::memory_order_acquire);
+			while (expected <= 0) {
+				expected = m_count.load(std::memory_order_acquire);
+			}
+		} while (!m_count.compare_exchange_weak(expected, expected - 1, std::memory_order_acq_rel, std::memory_order_acquire));
+		return true;
+	}
+
+	bool try_wait()
+	{
+		int expected = m_count.load(std::memory_order_acquire);
+		while (expected > 0) {
+			if (m_count.compare_exchange_weak(expected, expected - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool timed_wait(std::uint64_t) { return try_wait(); }
+
+	void signal() { m_count.fetch_add(1, std::memory_order_release); }
+
+	void signal(int count) { m_count.fetch_add(count, std::memory_order_release); }
+};
 #else
 #error Unsupported platform! (No semaphore wrapper available)
 #endif

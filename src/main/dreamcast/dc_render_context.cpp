@@ -24,6 +24,13 @@
 #include <dc/pvr.h>
 #include <dc/video.h>
 
+#ifndef PVR_TXRFMT_X32_STRIDE
+#define PVR_TXRFMT_X32_STRIDE PVR_TXRFMT_STRIDE
+#endif
+#ifndef pvr_txr_set_stride
+#define pvr_txr_set_stride(stride) (static_cast<void>(stride))
+#endif
+
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultra64.h"
 #include "dreamcast_platform.h"
@@ -82,7 +89,7 @@ DecodedVI decode_vi(const ultramodern::renderer::ViRegs& regs) {
     }
 
     const float y_scale = vi_y_scale_float(regs.VI_Y_SCALE_REG & 0xFFF);
-    uint32_t fb_height = static_cast<uint32_t>(std::lround(
+    uint32_t fb_height = static_cast<uint32_t>(lround(
         static_cast<float>(v_end - v_start) / (2.0f * y_scale * (static_cast<float>(fb_width) / static_cast<float>(width)))
     ));
 
@@ -90,7 +97,7 @@ DecodedVI decode_vi(const ultramodern::renderer::ViRegs& regs) {
     constexpr uint32_t extra_rows = 2;
     constexpr uint32_t divisor = 4;
     fb_height += extra_rows;
-    fb_height = static_cast<uint32_t>(std::lround(static_cast<float>(fb_height) / divisor)) * divisor;
+    fb_height = static_cast<uint32_t>(lround(static_cast<float>(fb_height) / divisor)) * divisor;
 
     if (fb_width == 0 || fb_height == 0) {
         return vi;

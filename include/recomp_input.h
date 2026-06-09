@@ -66,7 +66,13 @@ namespace recomp {
         uint32_t input_type;
         int32_t input_id;
         std::string to_string() const;
+#if defined(__GNUC__) && (__GNUC__ < 10)
+        bool operator==(const InputField& rhs) const {
+            return input_type == rhs.input_type && input_id == rhs.input_id;
+        }
+#else
         auto operator<=>(const InputField& rhs) const = default;
+#endif
     };
 
     void poll_inputs();

@@ -82,7 +82,9 @@ rdp::BlendState merge_blend(const rdp::BlendState& rdp_blend, bool vertex_transl
     return merge_blend(rdp_blend, vertex_translucent, argb, argb, argb);
 }
 
-void apply_blend_to_key(BatchKey& key, const rdp::BlendState& blend, bool zbuffer_enabled) {
+} // anonymous namespace
+
+void Renderer::apply_blend_to_key(BatchKey& key, const rdp::BlendState& blend, bool zbuffer_enabled) {
     key.list_type = blend.list_type;
     key.translucent = blend.translucent;
     key.punch_through = blend.punch_through;
@@ -93,8 +95,6 @@ void apply_blend_to_key(BatchKey& key, const rdp::BlendState& blend, bool zbuffe
     key.blend_src = blend.blend_src;
     key.blend_dst = blend.blend_dst;
 }
-
-} // anonymous namespace
 
 bool Renderer::BatchKey::operator==(const BatchKey& other) const {
     return list_type == other.list_type
@@ -222,17 +222,13 @@ void Renderer::flush_batch() {
 }
 
 void Renderer::begin_dr() {
-    if (!dr_active_) {
-        pvr_dr_init(&dr_state_);
-        dr_active_ = true;
-    }
+    // pvr_dr_init/pvr_dr_finish are deprecated no-ops on current KOS and are
+    // absent from older toolchains; direct rendering only needs pvr_dr_target().
+    dr_active_ = true;
 }
 
 void Renderer::end_dr() {
-    if (dr_active_) {
-        pvr_dr_finish();
-        dr_active_ = false;
-    }
+    dr_active_ = false;
 }
 
 void Renderer::submit_vertex_dr(const pvr_vertex_t& vert) {
@@ -278,7 +274,7 @@ void Renderer::begin_batch(const BatchKey& key) {
         cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
         cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
     } else {
-        cxt.depth.comparison = static_cast<pvr_depthcmp_mode_t>(key.depth_compare);
+        cxt.depth.comparison = key.depth_compare;
         cxt.depth.write = key.depth_write ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
     }
     if (key.punch_through) {
@@ -288,8 +284,8 @@ void Renderer::begin_batch(const BatchKey& key) {
         }
     }
     if (key.blend_enable) {
-        cxt.blend.src = static_cast<pvr_blend_mode_t>(key.blend_src);
-        cxt.blend.dst = static_cast<pvr_blend_mode_t>(key.blend_dst);
+        cxt.blend.src = key.blend_src;
+        cxt.blend.dst = key.blend_dst;
     }
 
     pvr_poly_compile(&batch_hdr_, &cxt);

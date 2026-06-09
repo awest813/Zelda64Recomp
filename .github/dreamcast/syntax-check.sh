@@ -20,6 +20,21 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
+# KOS CI uses GCC 9, which lacks C++20 operator<=> and a DREAMCAST WindowHandle
+# typedef in ultramodern. Apply the small compatibility patch before compiling.
+patch_file="$repo_root/.github/dreamcast/ultramodern-gcc9.patch"
+if [[ -f "$patch_file" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$patch_file" || true
+fi
+recomp_patch="$repo_root/.github/dreamcast/recomp-sh4.patch"
+if [[ -f "$recomp_patch" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime/N64Recomp" < "$recomp_patch" || true
+fi
+librecomp_patch="$repo_root/.github/dreamcast/librecomp-gcc9.patch"
+if [[ -f "$librecomp_patch" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$librecomp_patch" || true
+fi
+
 # ── Locate the KOS environment ───────────────────────────────────────
 # environ.sh exports KOS_CC_BASE / KOS_CC_PREFIX / KOS_CFLAGS / KOS_INC_PATHS
 # and (in recent KOS) the kos-c++ wrapper. Source it if the caller hasn't.
@@ -56,24 +71,52 @@ trap 'rm -rf "$gen_inc"' EXIT
 printf '#pragma once\n#define MINIZ_EXPORT\n' > "$gen_inc/miniz_export.h"
 
 includes=(
-    -Iinclude
-    -Ilib/N64ModernRuntime/ultramodern/include
-    -Ilib/N64ModernRuntime/librecomp/include
-    -Ilib/N64ModernRuntime/N64Recomp/include
-    -Ilib/N64ModernRuntime/thirdparty
-    -Ilib/N64ModernRuntime/thirdparty/miniz
-    -Ilib/concurrentqueue
-    -Ilib/SlotMap
-    -I"$gen_inc"
+  # std::span polyfill for KOS GCC 9 (must precede system C++ headers).
+  -I"$repo_root/lib/std_polyfill"
+  # KOS kernel headers (kos.h, dc/*.h) — not always present in KOS_INC_PATHS.
+  -isystem "${KOS_BASE}/include"
+  -isystem "${KOS_BASE}/kernel/arch/dreamcast/include"
+  -isystem "${KOS_BASE}/addons/include"
+  -Iinclude
+  -Ilib/N64ModernRuntime/ultramodern/include
+  -Ilib/N64ModernRuntime/librecomp/include
+  -Ilib/N64ModernRuntime/N64Recomp/include
+  -Ilib/N64ModernRuntime/thirdparty
+  -Ilib/N64ModernRuntime/thirdparty/miniz
+  -Ilib/concurrentqueue
+  -Ilib/SlotMap
+  -I"$gen_inc"
 )
+
+# Toolchain include paths and arch flags exported by environ.sh (newlib, sh-4, …).
+if [[ -n "${KOS_INC_PATHS:-}" ]]; then
+  # shellcheck disable=SC2206
+  includes+=(${KOS_INC_PATHS})
+fi
+
+# Pick a C++20 flag the installed KOS GCC accepts. Older KOS toolchains
+# (GCC 9/10) expose C++20 as -std=gnu++2a; newer ones accept -std=gnu++20.
+cxx_std='-std=gnu++2a'
+if "${CXX[@]}" -std=gnu++20 -fsyntax-only -x c++ /dev/null -o /dev/null 2>/dev/null; then
+    cxx_std='-std=gnu++20'
+fi
 
 # Flags matching the DREAMCAST build (see CMakeLists.txt / dreamcast.cmake).
 flags=(
-    -std=gnu++20
+    "$cxx_std"
+    -D_arch_dreamcast
+    -D_arch_sub_pristine
     -DDREAMCAST
     -fno-strict-aliasing
     -fsyntax-only
+    -include "$repo_root/lib/std_polyfill/cxxlib_shim.h"
 )
+
+# Arch/cpu flags exported by environ.sh (-ml, -m4-single-only, …).
+if [[ -n "${KOS_CFLAGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  flags+=(${KOS_CFLAGS})
+fi
 
 # ── Collect Dreamcast translation units ──────────────────────────────
 mapfile -t sources < <(find \

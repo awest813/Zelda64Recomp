@@ -59,7 +59,13 @@ set(CMAKE_SIZE         "${CROSS_PREFIX}size"    CACHE FILEPATH "" FORCE)
 set(DC_CPU_FLAGS "-ml -m4-single-only -ffunction-sections -fdata-sections")
 
 # ── KOS include/library paths ───────────────────────────────────────
+# std::span polyfill for KOS GCC 9 (libstdc++ predates <span>).
+get_filename_component(DC_STD_POLYFILL_DIR
+    "${CMAKE_CURRENT_LIST_DIR}/../../lib/std_polyfill"
+    ABSOLUTE)
+
 set(KOS_INC_DIRS
+    "${DC_STD_POLYFILL_DIR}"
     "${KOS_BASE}/include"
     "${KOS_BASE}/kernel/arch/${KOS_ARCH}/include"
     "${KOS_BASE}/addons/include"
@@ -81,11 +87,13 @@ foreach(dir ${KOS_INC_DIRS})
 endforeach()
 
 set(CMAKE_C_FLAGS_INIT   "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
-set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
+# Older KOS GCC (9/10) names C++20 -std=gnu++2a; newer toolchains accept
+# -std=gnu++20. Use gnu++2a here so cross-builds work on both.
+get_filename_component(DC_CXXLIB_SHIM
+    "${CMAKE_CURRENT_LIST_DIR}/../../lib/std_polyfill/cxxlib_shim.h"
+    ABSOLUTE)
+set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS} -std=gnu++2a -include ${DC_CXXLIB_SHIM}")
 set(CMAKE_ASM_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
-
-# C++ standard: KOS GCC 13+ supports C++20 but some library features may
-# be missing; the main build will downgrade as needed via #ifdef DREAMCAST.
 
 # ── Linker flags ─────────────────────────────────────────────────────
 set(KOS_LIB_FLAGS "")

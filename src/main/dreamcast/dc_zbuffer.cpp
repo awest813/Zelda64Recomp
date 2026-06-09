@@ -74,8 +74,9 @@ bool Buffer::is_occluded(float x, float y, float depth) const {
         return false;
     }
 
-    const int px = static_cast<int>(std::lround(x));
-    const int py = static_cast<int>(std::lround(y));
+    // KOS GCC 9 exposes lround in <math.h> but not in namespace std.
+    const int px = static_cast<int>(lround(x));
+    const int py = static_cast<int>(lround(y));
     if (px < 0 || py < 0 || px >= width_ || py >= height_) {
         return true;
     }
