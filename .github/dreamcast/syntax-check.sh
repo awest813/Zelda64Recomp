@@ -67,9 +67,16 @@ includes=(
     -I"$gen_inc"
 )
 
+# Pick a C++20 flag the installed KOS GCC accepts. Older KOS toolchains
+# (GCC 9/10) expose C++20 as -std=gnu++2a; newer ones accept -std=gnu++20.
+cxx_std='-std=gnu++2a'
+if "${CXX[@]}" -std=gnu++20 -fsyntax-only -x c++ /dev/null -o /dev/null 2>/dev/null; then
+    cxx_std='-std=gnu++20'
+fi
+
 # Flags matching the DREAMCAST build (see CMakeLists.txt / dreamcast.cmake).
 flags=(
-    -std=gnu++20
+    "$cxx_std"
     -DDREAMCAST
     -fno-strict-aliasing
     -fsyntax-only

@@ -81,11 +81,10 @@ foreach(dir ${KOS_INC_DIRS})
 endforeach()
 
 set(CMAKE_C_FLAGS_INIT   "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
-set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
+# Older KOS GCC (9/10) names C++20 -std=gnu++2a; newer toolchains accept
+# -std=gnu++20. Use gnu++2a here so cross-builds work on both.
+set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS} -std=gnu++2a")
 set(CMAKE_ASM_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
-
-# C++ standard: KOS GCC 13+ supports C++20 but some library features may
-# be missing; the main build will downgrade as needed via #ifdef DREAMCAST.
 
 # ── Linker flags ─────────────────────────────────────────────────────
 set(KOS_LIB_FLAGS "")
