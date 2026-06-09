@@ -59,7 +59,7 @@ RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     case M_NJPEGTASK:
         return njpgdspMain;
     default:
-        fprintf(stderr, "Unknown RSP task: %u\n", task->t.type);
+        fprintf(stderr, "Unknown RSP task: %lu\n", static_cast<unsigned long>(task->t.type));
         return nullptr;
     }
 }
