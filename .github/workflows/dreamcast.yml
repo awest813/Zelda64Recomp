@@ -23,6 +23,7 @@ on:
       - 'cmake/Toolchains/dreamcast.cmake'
       - '.github/dreamcast/**'
       - '.github/workflows/dreamcast.yml'
+      - 'tools/dreamcast/**'
   pull_request:
     types: [opened, synchronize]
     paths:
@@ -34,6 +35,7 @@ on:
       - 'cmake/Toolchains/dreamcast.cmake'
       - '.github/dreamcast/**'
       - '.github/workflows/dreamcast.yml'
+      - 'tools/dreamcast/**'
   workflow_dispatch:
 
 concurrency:
@@ -55,6 +57,9 @@ jobs:
           # ultramodern / librecomp / N64Recomp headers live in the
           # N64ModernRuntime submodule (and its nested submodules).
           submodules: recursive
+      - name: Check disc build script
+        shell: bash
+        run: bash -n tools/dreamcast/make_disc.sh
       - name: Syntax-check Dreamcast sources
         shell: bash
         run: |

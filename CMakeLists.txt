@@ -311,14 +311,27 @@ if (DREAMCAST)
     add_custom_command(TARGET Zelda64Recompiled POST_BUILD
         COMMENT "[DC] Converting ELF to Dreamcast binary..."
         COMMAND ${CMAKE_OBJCOPY} -R .stack -O binary $<TARGET_FILE:Zelda64Recompiled> ${CMAKE_BINARY_DIR}/1ST_READ.BIN
-        # To create a bootable disc image, run these manually with KOS tools:
-        # scramble 1ST_READ.BIN 1ST_READ.BIN
-        # makeip ip.txt IP.BIN
-        # mkdcdisc -e 1ST_READ.BIN -o zelda64recomp.cdi -n "ZELDA64 RECOMP"
+        # To create a bootable disc image, use tools/dreamcast/make_disc.sh
+        # (or the dc_disc target below with -DDC_ROM_FOR_DISC=<path>).
     )
 
+    # Optional: `cmake --build build-dreamcast --target dc_disc` builds a
+    # bootable CDI from the ELF. Requires mkdcdisc on PATH and the ROM path:
+    #   cmake ... -DDC_ROM_FOR_DISC=/path/to/mm.us.rev1.z64
+    if (DEFINED DC_ROM_FOR_DISC)
+        add_custom_target(dc_disc
+            COMMAND ${CMAKE_SOURCE_DIR}/tools/dreamcast/make_disc.sh
+                    -e $<TARGET_FILE:Zelda64Recompiled>
+                    -r ${DC_ROM_FOR_DISC}
+                    -o ${CMAKE_BINARY_DIR}/zelda64recomp.cdi
+            DEPENDS Zelda64Recompiled
+            COMMENT "[DC] Building bootable CDI disc image"
+            VERBATIM
+        )
+    endif()
+
     message(STATUS "[DC] Dreamcast build configured")
-    message(STATUS "[DC] After building, use 'scramble' and 'mkdcdisc' to create a bootable disc image")
+    message(STATUS "[DC] Use tools/dreamcast/make_disc.sh (mkdcdisc) to create a bootable disc image")
 
 elseif (WIN32)
     include(FetchContent)
