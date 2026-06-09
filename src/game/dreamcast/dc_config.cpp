@@ -16,6 +16,7 @@
 #include "zelda_config.h"
 #include "zelda_sound.h"
 #include "recomp_ui.h"
+#include "ultramodern/ultramodern.hpp"
 #include "dreamcast_platform.h"
 
 // ── Sound settings ───────────────────────────────────────────────────
@@ -118,13 +119,27 @@ void set_debug_mode_enabled(bool enabled) {
 }
 
 // ── Quit prompt ──────────────────────────────────────────────────────
-// On Dreamcast there is no RmlUi prompt system. Just quit cleanly.
+// Confirmation via the minimal DC prompt system. Confirming tells
+// ultramodern to exit its main loop; dc_main then flushes saves to the VMU
+// and shuts the platform down.
 void open_quit_game_prompt() {
-    fprintf(stdout, "[DC] Quit requested – shutting down\n");
-    // ultramodern::quit() will be called if the game thread exits.
-    // For a proper clean exit the caller should eventually let the game
-    // thread finish; here we set a global flag via the platform API.
-    dreamcast::platform_shutdown();
+    recompui::open_choice_prompt(
+        "Quit Game?",
+        "Unsaved progress will be lost.",
+        "Quit",
+        "Cancel",
+        []() {
+            recompui::close_prompt();
+            fprintf(stdout, "[DC] Quit confirmed - shutting down\n");
+            ultramodern::quit();
+        },
+        []() {
+            recompui::close_prompt();
+        },
+        recompui::ButtonVariant::Error,
+        recompui::ButtonVariant::Secondary,
+        true,  // focus_on_cancel
+        "");
 }
 
 } // namespace zelda64

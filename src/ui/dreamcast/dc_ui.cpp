@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <atomic>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <functional>
@@ -22,6 +24,8 @@
 #include <kos.h>
 #include <dc/pvr.h>
 #include <dc/biosfont.h>
+#include <dc/maple.h>
+#include <dc/maple/controller.h>
 
 #include "recomp_ui.h"
 #include "recomp_input.h"
@@ -87,6 +91,92 @@ void draw_bios_text(int x, int y, uint32_t color, const char* text) {
 // A fixed ContextId slot for the single Dreamcast menu context.
 constexpr uint32_t DC_MENU_CONTEXT_SLOT = 1;
 constexpr uint32_t DC_NULL_CONTEXT_SLOT = 0;
+
+// ── Full-screen error display helpers ────────────────────────────────
+// Drawn straight to the framebuffer with the BIOS font, so errors are
+// visible even before the PVR renderer exists (e.g. missing ROM at boot).
+
+// 12 px per BIOS-font glyph; leave a margin on both sides.
+constexpr size_t ERROR_WRAP_COLUMNS = 48;
+constexpr int ERROR_MAX_LINES = 12;
+
+void fill_framebuffer(uint16_t color565) {
+    uint16_t* fb = vram_s;
+    for (int i = 0; i < DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT; i++) {
+        fb[i] = color565;
+    }
+}
+
+// Raw button state of the first controller, bypassing the game input system
+// (which may not be polling yet when a fatal error is shown).
+uint32_t poll_raw_buttons() {
+    maple_device_t* cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    if (cont == nullptr) {
+        return 0;
+    }
+    cont_state_t* state = reinterpret_cast<cont_state_t*>(maple_dev_status(cont));
+    return (state != nullptr) ? state->buttons : 0;
+}
+
+// Greedy word wrap into at most ERROR_MAX_LINES lines.
+std::vector<std::string> wrap_text(const char* text, size_t max_columns) {
+    std::vector<std::string> lines;
+    std::string current;
+    std::string word;
+
+    auto flush_word = [&]() {
+        if (word.empty()) {
+            return;
+        }
+        if (!current.empty() && current.size() + 1 + word.size() > max_columns) {
+            lines.push_back(current);
+            current.clear();
+        }
+        if (!current.empty()) {
+            current += ' ';
+        }
+        // Hard-split words longer than a full line.
+        while (word.size() > max_columns) {
+            lines.push_back(word.substr(0, max_columns));
+            word.erase(0, max_columns);
+        }
+        current += word;
+        word.clear();
+    };
+
+    for (const char* p = text; *p != '\0'; p++) {
+        if (*p == '\n') {
+            flush_word();
+            lines.push_back(current);
+            current.clear();
+        } else if (*p == ' ' || *p == '\t') {
+            flush_word();
+        } else {
+            word += *p;
+        }
+    }
+    flush_word();
+    if (!current.empty()) {
+        lines.push_back(current);
+    }
+    if (lines.size() > static_cast<size_t>(ERROR_MAX_LINES)) {
+        lines.resize(ERROR_MAX_LINES);
+        lines.back() += " ...";
+    }
+    return lines;
+}
+
+// One-shot filter for librecomp's spurious "stored ROM" error (see
+// dc_suppress_next_stored_rom_error() in dreamcast_platform.h).
+std::atomic<bool> suppress_stored_rom_error{false};
+
+// ── Notification toast state ─────────────────────────────────────────
+// open_notification() messages are shown for a few seconds at the bottom of
+// the screen instead of being dropped on stdout.
+std::mutex toast_mutex;
+std::string toast_text;
+int toast_frames_remaining = 0;
+constexpr int TOAST_DURATION_FRAMES = 300; // ~5 s at 60 Hz
 
 } // anonymous namespace
 
@@ -274,6 +364,16 @@ void open_config_menu() {
     };
     {
         MenuEntry m;
+        m.label = "Quit Game";
+        m.enabled = true;
+        m.action = []() {
+            zelda64::save_config();
+            zelda64::open_quit_game_prompt();
+        };
+        e.push_back(std::move(m));
+    }
+    {
+        MenuEntry m;
         m.label = "Back (save)";
         m.enabled = true;
         m.action = save_and_close;
@@ -320,8 +420,56 @@ void activate_mouse() {
 
 // ── Error display ────────────────────────────────────────────────────
 
+void show_error_screen(const char* title, const char* message) {
+    fprintf(stderr, "[DC ERROR] %s: %s\n", title, message);
+
+    const std::vector<std::string> lines = wrap_text(message, ERROR_WRAP_COLUMNS);
+
+    // Dark blue background so the screen is clearly distinct from a hang.
+    constexpr uint16_t ERROR_BG_565 = 0x000A;
+
+    uint32_t prev_buttons = poll_raw_buttons();
+    // Give up after ~60 seconds so a console without a controller attached
+    // does not block forever (the error remains on the serial log).
+    constexpr int TIMEOUT_ITERATIONS = 60 * 60;
+    for (int i = 0; i < TIMEOUT_ITERATIONS; i++) {
+        // Redraw every iteration: if a render thread is still presenting PVR
+        // frames it will overwrite the framebuffer, so keep restoring it.
+        fill_framebuffer(ERROR_BG_565);
+
+        int y = 80;
+        draw_bios_text(MENU_PADDING * 2, y, COLOR_YELLOW, title);
+        y += FONT_CHAR_H * 2;
+        for (const std::string& line : lines) {
+            draw_bios_text(MENU_PADDING * 2, y, COLOR_WHITE, line.c_str());
+            y += FONT_CHAR_H + 2;
+        }
+        draw_bios_text(MENU_PADDING * 2, DC_SCREEN_HEIGHT - FONT_CHAR_H * 2,
+                       COLOR_GRAY, "Press A to continue");
+
+        const uint32_t buttons = poll_raw_buttons();
+        if ((buttons & ~prev_buttons) & (CONT_A | CONT_START)) {
+            break;
+        }
+        prev_buttons = buttons;
+        thd_sleep(16);
+    }
+}
+
+void dc_suppress_next_stored_rom_error() {
+    suppress_stored_rom_error.store(true);
+}
+
 void message_box(const char* msg) {
-    fprintf(stderr, "[DC UI] %s\n", msg);
+    // The Dreamcast boot path loads the ROM directly from GD-ROM with
+    // set_rom_contents(); librecomp's load_stored_rom() still runs and fails
+    // (there is no stored-ROM copy on this platform), so filter that one
+    // expected complaint instead of blocking boot with a bogus error screen.
+    if (suppress_stored_rom_error.exchange(false) && strstr(msg, "stored ROM") != nullptr) {
+        fprintf(stdout, "[DC UI] suppressed expected message: %s\n", msg);
+        return;
+    }
+    show_error_screen("Error", msg);
 }
 
 // ── Rendering hooks ──────────────────────────────────────────────────
@@ -380,6 +528,15 @@ void open_notification(
     const std::string& /*return_element_id*/) {
 
     fprintf(stdout, "[DC UI] %s: %s\n", header_text.c_str(), content_text.c_str());
+
+    std::lock_guard<std::mutex> lock(toast_mutex);
+    toast_text = header_text.empty() ? content_text : (header_text + ": " + content_text);
+    // bfont has no clipping; keep the line inside the framebuffer.
+    if (toast_text.size() > ERROR_WRAP_COLUMNS) {
+        toast_text.resize(ERROR_WRAP_COLUMNS - 3);
+        toast_text += "...";
+    }
+    toast_frames_remaining = TOAST_DURATION_FRAMES;
 }
 
 void close_prompt() {
@@ -477,6 +634,16 @@ void render_menu_pvr_background() {
 }
 
 void render_menu_overlay() {
+    // Notification toast (independent of the menu).
+    {
+        std::lock_guard<std::mutex> lock(toast_mutex);
+        if (toast_frames_remaining > 0) {
+            draw_bios_text(MENU_PADDING, DC_SCREEN_HEIGHT - FONT_CHAR_H - MENU_PADDING / 2,
+                           COLOR_YELLOW, toast_text.c_str());
+            toast_frames_remaining--;
+        }
+    }
+
     if (!current_menu.visible) return;
 
     // BIOS-font labels are drawn directly to the framebuffer after the PVR

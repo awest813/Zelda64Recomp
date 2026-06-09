@@ -105,19 +105,18 @@ cmake --build build-dreamcast --target Zelda64Recompiled -j$(nproc)
 
 ### Creating a Disc Image
 
-After building, create a bootable GD-ROM disc image:
+Use the bundled script, which drives [mkdcdisc](https://gitlab.com/simulant/mkdcdisc). mkdcdisc takes the *unscrambled* ELF and generates IP.BIN and the scrambled `1ST_READ.BIN` itself — do not pre-scramble anything:
 
 ```bash
-cd build-dreamcast
-# Scramble the binary (required for Dreamcast boot)
-scramble 1ST_READ.BIN 1ST_READ.BIN
-# Create IP.BIN (bootstrap)
-makeip /path/to/ip.txt IP.BIN
-# Create disc image
-mkdcdisc -e 1ST_READ.BIN -o zelda64recomp.cdi -n "ZELDA64 RECOMP"
+tools/dreamcast/make_disc.sh \
+    -e build-dreamcast/Zelda64Recompiled \
+    -r /path/to/mm.us.rev1.z64 \
+    -o zelda64recomp.cdi
 ```
 
-Place the game ROM on the disc as `/cd/rom.z64`.
+The script stages the ROM at the disc root as `rom.z64` (the path the game loads at boot) and optionally adds an asset directory with `-a`. Alternatively, configure with `-DDC_ROM_FOR_DISC=/path/to/rom.z64` and run `cmake --build build-dreamcast --target dc_disc`.
+
+The resulting `.cdi` boots in Flycast/lxdream or can be burned for a real console. At boot the game auto-loads `/cd/rom.z64` (no launcher); a missing or wrong ROM shows an on-screen error. Saves and config are mirrored to a VMU in slot A1 as a single `ZELDA64.SAV` file.
 
 ### Important Notes
 

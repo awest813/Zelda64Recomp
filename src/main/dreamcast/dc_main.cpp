@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <new>
+#include <utility>
 #include <vector>
 #include <memory>
 #include <string>
@@ -22,6 +24,7 @@
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
 #include "recomp_input.h"
+#include "recomp_ui.h"
 #include "zelda_config.h"
 #include "zelda_render.h"
 #include "zelda_sound.h"
@@ -153,6 +156,105 @@ void reorder_texture_pack(recomp::mods::ModContext&) {}
 // Note: recompui::message_box() and recompui::update_supported_options()
 // are implemented in dc_ui.cpp; no duplicate definitions here.
 
+// ── Boot-time ROM loading ───────────────────────────────────────────
+// There is no launcher UI on Dreamcast, so nothing would ever call
+// recomp::select_rom() / recomp::start_game(). Instead, load the ROM from
+// the fixed GD-ROM path, hand it to librecomp directly, and start the game
+// before entering recomp::start() (whose game thread then proceeds
+// immediately instead of waiting for a launcher).
+
+namespace {
+
+// In-place de-byteswap for .v64 (16-bit swapped) and .n64 (32-bit swapped)
+// dumps so users do not have to convert their ROM to .z64 by hand.
+void byteswap_rom(std::vector<uint8_t>& data, size_t stride) {
+    for (size_t i = 0; i + stride <= data.size(); i += stride) {
+        for (size_t j = 0; j < stride / 2; j++) {
+            std::swap(data[i + j], data[i + stride - 1 - j]);
+        }
+    }
+}
+
+bool dc_boot_load_rom() {
+    const size_t rom_size = dreamcast::gdrom_file_size(DC_ROM_PATH);
+    // MM US 1.0 is 32 MB; require at least the 4 KB header region so an
+    // empty or placeholder file is rejected up front.
+    if (rom_size < 0x1000) {
+        recompui::show_error_screen(
+            "ROM Not Found",
+            "Could not read rom.z64 from the disc.\n\n"
+            "Burn your Majora's Mask (US) ROM to the disc root as rom.z64 "
+            "(see tools/dreamcast/make_disc.sh).");
+        return false;
+    }
+
+    std::vector<uint8_t> rom_data;
+    // 16 MB main RAM cannot hold the 32 MB ROM; until streamed PI reads from
+    // GD-ROM are implemented this allocation is expected to fail on real
+    // hardware. Fail with a readable explanation instead of an abort.
+    try {
+        rom_data.resize((rom_size + 3) & ~size_t{3});
+    } catch (const std::bad_alloc&) {
+        recompui::show_error_screen(
+            "Out of Memory",
+            "Not enough RAM to load the ROM image.\n\n"
+            "The Dreamcast port currently requires the whole ROM in memory; "
+            "streamed GD-ROM reads are not implemented yet (see PROGRESS.md).");
+        return false;
+    }
+
+    if (!dreamcast::gdrom_read_file(DC_ROM_PATH, rom_data.data(), rom_size)) {
+        recompui::show_error_screen("Disc Read Error",
+                                    "Failed to read rom.z64 from the disc.");
+        return false;
+    }
+
+    // Identify byte order from the first word (big-endian z64 is 0x80371240).
+    const uint32_t first_word = (uint32_t(rom_data[0]) << 24) | (uint32_t(rom_data[1]) << 16) |
+                                (uint32_t(rom_data[2]) << 8) | uint32_t(rom_data[3]);
+    switch (first_word) {
+        case 0x80371240u:
+            break;
+        case 0x37804012u:
+            byteswap_rom(rom_data, 2);
+            break;
+        case 0x40123780u:
+            byteswap_rom(rom_data, 4);
+            break;
+        default:
+            recompui::show_error_screen("Invalid ROM",
+                                        "rom.z64 is not an N64 ROM image.");
+            return false;
+    }
+
+    // Match the registered game by internal name (offset 0x20).
+    const auto& game = supported_games[0];
+    if (memcmp(rom_data.data() + 0x20, game.internal_name.c_str(), game.internal_name.size()) != 0) {
+        recompui::show_error_screen(
+            "Wrong ROM",
+            "The ROM on the disc is not Majora's Mask (US).\n\n"
+            "This build only supports the US 1.0 release.");
+        return false;
+    }
+
+    fprintf(stdout, "[DC] Loaded ROM from %s (%zu bytes)\n", DC_ROM_PATH, rom_size);
+    recomp::set_rom_contents(std::move(rom_data));
+    // librecomp's load_stored_rom() will still run and fail (the ROM is not
+    // re-stored under the config path on this platform); silence that one
+    // expected complaint.
+    recompui::dc_suppress_next_stored_rom_error();
+    recomp::start_game(game.game_id);
+    return true;
+}
+
+// VI callback: shared rumble bookkeeping plus the VMU save mirror.
+void dc_vi_callback() {
+    recomp::update_rumble();
+    dreamcast::storage_poll();
+}
+
+} // anonymous namespace
+
 // ── Main ────────────────────────────────────────────────────────────
 
 #define REGISTER_FUNC(name) recomp::overlays::register_base_export(#name, name)
@@ -171,6 +273,10 @@ int main(int argc, char** argv) {
 
     // Initialize Dreamcast platform
     dreamcast::platform_init();
+
+    // Set up the ramdisk working tree and restore saves/config from the VMU
+    // before anything reads or writes the config path.
+    dreamcast::storage_init();
 
     // Initialize audio
     dreamcast::aica_init(48000);
@@ -233,7 +339,7 @@ int main(int argc, char** argv) {
     };
 
     ultramodern::events::callbacks_t thread_callbacks{
-        .vi_callback = recomp::update_rumble,
+        .vi_callback = dc_vi_callback,
         .gfx_init_callback = recompui::update_supported_options,
     };
 
@@ -244,6 +350,14 @@ int main(int argc, char** argv) {
     ultramodern::threads::callbacks_t threads_callbacks{
         .get_game_thread_name = zelda64::get_game_thread_name,
     };
+
+    // Load the ROM from GD-ROM and mark the game as started; recomp::start()
+    // below then boots straight into gameplay (there is no launcher UI).
+    if (!dc_boot_load_rom()) {
+        dreamcast::aica_shutdown();
+        dreamcast::platform_shutdown();
+        return EXIT_FAILURE;
+    }
 
     recomp::start(
         project_version,
@@ -257,6 +371,9 @@ int main(int argc, char** argv) {
         error_handling_callbacks,
         threads_callbacks
     );
+
+    // Final mirror of saves/config to the VMU before powering down.
+    dreamcast::storage_flush();
 
     dreamcast::aica_shutdown();
     dreamcast::platform_shutdown();

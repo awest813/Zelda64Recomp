@@ -11,7 +11,14 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
+#include <atomic>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include <kos.h>
 #include <dc/cdrom.h>
@@ -19,8 +26,11 @@
 #include <dc/maple.h>
 #include <dc/maple/vmu.h>
 
+#include <cstddef>
+
 #include "zelda_support.h"
 #include "zelda_config.h"
+#include "recomp_ui.h"
 #include "dreamcast_platform.h"
 
 // ── Platform init / shutdown ────────────────────────────────────────
@@ -33,7 +43,8 @@ void platform_init() {
     // Initialize the CD-ROM filesystem for reading the game ROM
     // The GD-ROM should already be accessible via /cd/ after KOS init
     fprintf(stdout, "[DC] GD-ROM filesystem available at /cd/\n");
-    fprintf(stdout, "[DC] VMU save path: %s\n", DC_SAVE_PATH_PREFIX);
+    fprintf(stdout, "[DC] Working storage: %s (mirrored to VMU %s%s)\n",
+            DC_RAM_STORAGE_PATH, DC_SAVE_PATH_PREFIX, DC_VMU_MIRROR_FILE);
     fprintf(stdout, "[DC] Platform initialized\n");
 }
 
@@ -193,6 +204,261 @@ bool gdrom_read_file(const char* path, void* buffer, size_t size) {
 
 } // namespace dreamcast
 
+// ── RAM-backed storage with VMU mirroring ────────────────────────────
+// The shared save/config code (librecomp pi.cpp, src/game/config.cpp) writes
+// regular files with subdirectories, long names, and ".swp" backup suffixes.
+// None of that works on the flat, 12-character vmufs, so those writers target
+// the KOS ramdisk (DC_RAM_STORAGE_PATH) instead and the functions below
+// mirror the whole tree into a single VMU archive file.
+//
+// Archive layout (little-endian, SH-4 native):
+//   ArchiveHeader
+//   file_count * { ArchiveFileHeader, stored_size bytes of data }
+// Each file is stored with its trailing run of identical bytes stripped
+// (flashram saves are mostly 0x00/0xFF padding), which keeps a fresh 128 KB
+// save well within the ~100 free blocks of a typical VMU.
+
+namespace {
+
+constexpr uint32_t ARCHIVE_MAGIC   = 0x5A363441; // 'Z64A'
+constexpr uint32_t ARCHIVE_VERSION = 1;
+constexpr size_t   ARCHIVE_NAME_MAX = 48;
+// VI callbacks arrive at ~60 Hz; mirror at most every ~5 seconds.
+constexpr uint32_t STORAGE_POLL_INTERVAL = 300;
+
+struct ArchiveHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t file_count;
+};
+
+struct ArchiveFileHeader {
+    char name[ARCHIVE_NAME_MAX]; // NUL-terminated path relative to DC_RAM_STORAGE_PATH
+    uint32_t full_size;          // size after restore (stored data + fill run)
+    uint32_t stored_size;        // bytes of payload present in the archive
+    uint8_t fill_byte;           // value of the stripped trailing run
+    uint8_t pad[3];
+};
+
+std::mutex storage_mutex;            // guards last_mirror_ against poll/flush races
+std::vector<uint8_t> last_mirror_;   // archive image as last written to (or read from) the VMU
+std::atomic<bool> mirror_busy_{false};
+std::atomic<bool> mirror_error_notified_{false};
+
+void append_bytes(std::vector<uint8_t>& out, const void* data, size_t size) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    out.insert(out.end(), p, p + size);
+}
+
+// Serialise every regular file under DC_RAM_STORAGE_PATH into an archive blob.
+std::vector<uint8_t> build_archive() {
+    std::vector<uint8_t> blob;
+    uint32_t file_count = 0;
+
+    ArchiveHeader header{ARCHIVE_MAGIC, ARCHIVE_VERSION, 0};
+    append_bytes(blob, &header, sizeof(header));
+
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(DC_RAM_STORAGE_PATH, ec);
+    if (ec) {
+        return blob;
+    }
+
+    const std::filesystem::path root(DC_RAM_STORAGE_PATH);
+    for (const auto& entry : it) {
+        if (!entry.is_regular_file(ec)) {
+            continue;
+        }
+
+        const std::string rel = entry.path().lexically_relative(root).generic_string();
+        if (rel.empty() || rel.size() >= ARCHIVE_NAME_MAX) {
+            fprintf(stderr, "[DC] storage: skipping '%s' (name too long)\n", rel.c_str());
+            continue;
+        }
+        // Skip librecomp's in-flight backup files; they are transient.
+        if (rel.size() > 4 && rel.compare(rel.size() - 4, 4, ".swp") == 0) {
+            continue;
+        }
+
+        std::ifstream in(entry.path(), std::ios::binary);
+        if (!in.good()) {
+            continue;
+        }
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
+                                  std::istreambuf_iterator<char>());
+
+        ArchiveFileHeader fh{};
+        strncpy(fh.name, rel.c_str(), ARCHIVE_NAME_MAX - 1);
+        fh.full_size = static_cast<uint32_t>(data.size());
+        fh.fill_byte = data.empty() ? 0 : data.back();
+        size_t stored = data.size();
+        while (stored > 0 && data[stored - 1] == fh.fill_byte) {
+            stored--;
+        }
+        fh.stored_size = static_cast<uint32_t>(stored);
+
+        append_bytes(blob, &fh, sizeof(fh));
+        append_bytes(blob, data.data(), stored);
+        file_count++;
+    }
+
+    // Patch the final file count into the header.
+    memcpy(blob.data() + offsetof(ArchiveHeader, file_count), &file_count, sizeof(file_count));
+    return blob;
+}
+
+// Recreate the ramdisk tree from an archive blob read off the VMU.
+bool restore_archive(const std::vector<uint8_t>& blob) {
+    if (blob.size() < sizeof(ArchiveHeader)) {
+        return false;
+    }
+
+    ArchiveHeader header;
+    memcpy(&header, blob.data(), sizeof(header));
+    if (header.magic != ARCHIVE_MAGIC || header.version != ARCHIVE_VERSION) {
+        fprintf(stderr, "[DC] storage: VMU archive has bad magic/version\n");
+        return false;
+    }
+
+    const std::filesystem::path root(DC_RAM_STORAGE_PATH);
+    size_t offset = sizeof(ArchiveHeader);
+    for (uint32_t i = 0; i < header.file_count; i++) {
+        if (offset + sizeof(ArchiveFileHeader) > blob.size()) {
+            fprintf(stderr, "[DC] storage: VMU archive truncated\n");
+            return false;
+        }
+        ArchiveFileHeader fh;
+        memcpy(&fh, blob.data() + offset, sizeof(fh));
+        offset += sizeof(fh);
+        fh.name[ARCHIVE_NAME_MAX - 1] = '\0';
+
+        if (fh.stored_size > fh.full_size || offset + fh.stored_size > blob.size()) {
+            fprintf(stderr, "[DC] storage: VMU archive entry out of bounds\n");
+            return false;
+        }
+        // Reject path escapes; entries are written as plain relative paths.
+        const std::string rel(fh.name);
+        if (rel.empty() || rel.front() == '/' || rel.find("..") != std::string::npos) {
+            offset += fh.stored_size;
+            continue;
+        }
+
+        const std::filesystem::path dest = root / rel;
+        std::error_code ec;
+        std::filesystem::create_directories(dest.parent_path(), ec);
+
+        std::ofstream out(dest, std::ios::binary | std::ios::trunc);
+        if (out.good()) {
+            out.write(reinterpret_cast<const char*>(blob.data() + offset), fh.stored_size);
+            // Re-expand the stripped trailing run.
+            std::vector<char> fill(4096, static_cast<char>(fh.fill_byte));
+            size_t remaining = fh.full_size - fh.stored_size;
+            while (remaining > 0 && out.good()) {
+                const size_t chunk = (remaining < fill.size()) ? remaining : fill.size();
+                out.write(fill.data(), chunk);
+                remaining -= chunk;
+            }
+        }
+        offset += fh.stored_size;
+    }
+
+    return true;
+}
+
+// Write an archive blob to the VMU. Returns false when no VMU is present or
+// the write fails (e.g. out of blocks).
+bool write_mirror_to_vmu(const std::vector<uint8_t>& blob) {
+    const bool ok = dreamcast::vmu_save(DC_VMU_MIRROR_FILE, blob.data(), blob.size());
+    if (!ok && !mirror_error_notified_.exchange(true)) {
+        // Surface the failure once on screen; repeating it every poll would
+        // make the game unplayable when no VMU is inserted.
+        recompui::open_notification(
+            "Save warning",
+            "Could not write save data to the VMU. Check that a VMU with free blocks is inserted in slot A1.",
+            "");
+    }
+    if (ok) {
+        mirror_error_notified_.store(false);
+    }
+    return ok;
+}
+
+} // anonymous namespace
+
+namespace dreamcast {
+
+void storage_init() {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(DC_RAM_STORAGE_PATH) / "saves", ec);
+    if (ec) {
+        fprintf(stderr, "[DC] storage: failed to create %s\n", DC_RAM_STORAGE_PATH);
+    }
+
+    // Restore the previous session's tree from the VMU, if present.
+    // The archive is at most a little over the 128 KB flashram save.
+    constexpr size_t MAX_ARCHIVE_SIZE = 192 * 1024;
+    std::vector<uint8_t> blob(MAX_ARCHIVE_SIZE);
+    size_t loaded = 0;
+    if (vmu_load(DC_VMU_MIRROR_FILE, blob.data(), blob.size(), &loaded) && loaded > 0) {
+        blob.resize(loaded);
+        if (restore_archive(blob)) {
+            fprintf(stdout, "[DC] storage: restored %zu bytes from VMU\n", loaded);
+            std::lock_guard<std::mutex> lock(storage_mutex);
+            last_mirror_ = std::move(blob);
+        }
+    } else {
+        fprintf(stdout, "[DC] storage: no VMU mirror found (fresh start)\n");
+    }
+}
+
+void storage_poll() {
+    static uint32_t counter = 0;
+    if (++counter < STORAGE_POLL_INTERVAL) {
+        return;
+    }
+    counter = 0;
+
+    if (mirror_busy_.load(std::memory_order_acquire)) {
+        return; // Previous VMU write still in flight.
+    }
+
+    std::vector<uint8_t> blob = build_archive();
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        if (blob == last_mirror_) {
+            return; // Nothing changed since the last mirror.
+        }
+        last_mirror_ = blob;
+    }
+
+    // VMU writes take on the order of seconds for ~100 KB; do them off the
+    // VI callback thread so the game does not hitch.
+    mirror_busy_.store(true, std::memory_order_release);
+    std::thread([moved_blob = std::move(blob)]() {
+        write_mirror_to_vmu(moved_blob);
+        mirror_busy_.store(false, std::memory_order_release);
+    }).detach();
+}
+
+void storage_flush() {
+    // Wait for any in-flight background write to finish.
+    while (mirror_busy_.load(std::memory_order_acquire)) {
+        thd_sleep(50);
+    }
+
+    std::vector<uint8_t> blob = build_archive();
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        if (blob == last_mirror_) {
+            return;
+        }
+        last_mirror_ = blob;
+    }
+    write_mirror_to_vmu(blob);
+}
+
+} // namespace dreamcast
+
 // ── zelda_support.h implementation ──────────────────────────────────
 
 namespace zelda64 {
@@ -223,13 +489,15 @@ void open_file_dialog_multiple(std::function<void(bool success, const std::list<
 }
 
 void show_error_message_box(const char* title, const char* message) {
-    fprintf(stderr, "[DC ERROR] %s: %s\n", title, message);
+    recompui::show_error_screen(title, message);
 }
 
 std::filesystem::path get_app_folder_path() {
-    // Config/save data goes to VMU, but the path API expects a filesystem
-    // path. Use the VMU mount point.
-    return std::filesystem::path(DC_SAVE_PATH_PREFIX);
+    // Config and save files are written here by the shared code, then
+    // mirrored to the VMU by dreamcast::storage_poll()/storage_flush().
+    // (The vmufs is flat with 12-character names, so the shared writers
+    // cannot target it directly.)
+    return std::filesystem::path(DC_RAM_STORAGE_PATH);
 }
 
 } // namespace zelda64

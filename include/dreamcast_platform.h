@@ -50,6 +50,14 @@
 #define DC_ASSET_BASE_PATH  "/cd/assets/"
 #define DC_SAVE_PATH_PREFIX "/vmu/a1/"
 
+// Working storage lives on the KOS ramdisk because the VMU filesystem is
+// flat (no subdirectories) and limits filenames to 12 characters, which the
+// shared librecomp save/config paths (e.g. "saves/mm.n64.us.1.0.bin",
+// "graphics.json.swp") violate. The whole tree is mirrored to a single VMU
+// archive file by dreamcast::storage_poll()/storage_flush().
+#define DC_RAM_STORAGE_PATH "/ram/zelda64"
+#define DC_VMU_MIRROR_FILE  "ZELDA64.SAV"   // <= 12 chars (vmufs limit)
+
 #include <cstdint>
 #include <cstddef>
 
@@ -86,6 +94,22 @@ namespace dreamcast {
     bool gdrom_file_exists(const char* path);
     size_t gdrom_file_size(const char* path);
     bool gdrom_read_file(const char* path, void* buffer, size_t size);
+
+    // ── RAM-backed storage with VMU mirroring ───────────────────────
+    // Saves and config JSON are written by the shared (librecomp / config.cpp)
+    // code to DC_RAM_STORAGE_PATH on the KOS ramdisk. These functions mirror
+    // that tree to/from a single VMU archive file (DC_VMU_MIRROR_FILE) so the
+    // data survives a power cycle.
+    //
+    // storage_init():  create the ramdisk tree and restore it from the VMU.
+    //                  Must run before load_config() / recomp::start().
+    // storage_poll():  rate-limited change detection; mirrors to the VMU on a
+    //                  background thread when the tree changed. Called from
+    //                  the VI callback (~60 Hz; it self-limits internally).
+    // storage_flush(): synchronous mirror, called once at shutdown.
+    void storage_init();
+    void storage_poll();
+    void storage_flush();
 }
 
 // ── Dreamcast UI overlay (implemented in src/ui/dreamcast/dc_ui.cpp) ──
@@ -103,6 +127,19 @@ namespace recompui {
     // Values are written through the zelda64 config setters and persisted to
     // the VMU when the menu is dismissed.
     void open_config_menu();
+
+    // Blocking full-screen error display drawn with the BIOS font directly to
+    // the framebuffer, so it works before PVR init and after fatal errors.
+    // Returns when the player presses A/Start (or after a timeout, so a
+    // headless/disconnected console does not hang forever).
+    void show_error_screen(const char* title, const char* message);
+
+    // The Dreamcast boot path loads the ROM itself (recomp::set_rom_contents)
+    // because librecomp's "stored ROM" lives under the config path, which is
+    // not writable storage big enough for a ROM on this platform. librecomp
+    // still tries to load the stored ROM and reports a spurious error; this
+    // arms a one-shot filter that downgrades that message box to a log line.
+    void dc_suppress_next_stored_rom_error();
 }
 
 #endif // DREAMCAST
