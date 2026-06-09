@@ -25,7 +25,6 @@
 #include <dc/vmu_pkg.h>
 #include <dc/maple.h>
 #include <dc/maple/vmu.h>
-#include <dc/maple/memcard.h>
 
 #include <cstddef>
 
@@ -35,6 +34,18 @@
 #include "dreamcast_platform.h"
 
 // ── Platform init / shutdown ────────────────────────────────────────
+
+namespace {
+
+// Older KOS headers expose this via maple_dev_status() but do not always ship
+// a dedicated memcard.h in the cross-SDK include tree.
+struct memcard_state_t {
+    int port;
+    int unit;
+    int free_blocks;
+};
+
+} // anonymous namespace
 
 namespace dreamcast {
 

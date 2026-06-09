@@ -8,6 +8,9 @@
 #ifndef PVR_TXRFMT_X32_STRIDE
 #define PVR_TXRFMT_X32_STRIDE PVR_TXRFMT_STRIDE
 #endif
+#ifndef pvr_txr_set_stride
+#define pvr_txr_set_stride(stride) (static_cast<void>(stride))
+#endif
 
 #include <algorithm>
 #include <array>

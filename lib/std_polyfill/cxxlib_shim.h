@@ -6,6 +6,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <fenv.h>
+
+#ifndef FE_TONEAREST
+#define FE_TONEAREST 0
+#define FE_TOWARDZERO 3
+#define FE_UPWARD 2
+#define FE_DOWNWARD 1
+inline int fegetround() { return FE_TONEAREST; }
+inline int fesetround(int) { return 0; }
+#endif
 
 // newlib exposes C99 math/stdio in the global namespace only.
 namespace std {
@@ -51,19 +61,12 @@ inline std::string to_string(long double value) {
     std::snprintf(buf, sizeof(buf), "%Lg", value);
     return buf;
 }
-// Minimal threading primitives for syntax-check / bring-up when libstdc++ omits them.
+#if !defined(_GLIBCXX_MUTEX)
+// Minimal threading primitives for bring-up when libstdc++ omits <mutex>.
 class mutex {
 public:
     void lock() {}
     void unlock() {}
-};
-template <typename Mutex>
-class lock_guard {
-public:
-    explicit lock_guard(Mutex& m) : m_(m) { m_.lock(); }
-    ~lock_guard() { m_.unlock(); }
-private:
-    Mutex& m_;
 };
 class thread {
 public:
@@ -71,5 +74,6 @@ public:
     explicit thread(F&&) {}
     void detach() {}
 };
+#endif
 } // namespace std
 #endif

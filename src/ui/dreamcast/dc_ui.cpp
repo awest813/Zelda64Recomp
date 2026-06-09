@@ -85,7 +85,8 @@ void draw_bios_text(int x, int y, uint32_t color, const char* text) {
     // game frames. (KOS BIOS font API: colors are set separately from the draw.)
     bfont_set_foreground_color(fg565);
     bfont_set_background_color(0x0000u);
-    bfont_draw_str(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH, 1 /*opaque*/, text);
+    bfont_draw_str(vram_s + y * DC_SCREEN_WIDTH + x, DC_SCREEN_WIDTH, 1 /*opaque*/,
+                   const_cast<char*>(text));
 }
 
 // A fixed ContextId slot for the single Dreamcast menu context.
