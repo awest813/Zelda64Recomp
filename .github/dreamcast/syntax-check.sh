@@ -55,16 +55,13 @@ gen_inc="$(mktemp -d)"
 trap 'rm -rf "$gen_inc"' EXIT
 printf '#pragma once\n#define MINIZ_EXPORT\n' > "$gen_inc/miniz_export.h"
 
-kos_cc_base="${KOS_CC_BASE:-/opt/toolchains/dc/sh-elf}"
-
 includes=(
   # std::span polyfill for KOS GCC 9 (must precede system C++ headers).
-  -isystem "$repo_root/lib/std_polyfill"
-  # KOS headers (mirrors cmake/Toolchains/dreamcast.cmake KOS_INC_DIRS).
+  -I"$repo_root/lib/std_polyfill"
+  # KOS kernel headers (kos.h, dc/*.h) — not always present in KOS_INC_PATHS.
   -isystem "${KOS_BASE}/include"
   -isystem "${KOS_BASE}/kernel/arch/dreamcast/include"
   -isystem "${KOS_BASE}/addons/include"
-  -isystem "${kos_cc_base}/sh-elf/include"
   -Iinclude
   -Ilib/N64ModernRuntime/ultramodern/include
   -Ilib/N64ModernRuntime/librecomp/include
@@ -75,6 +72,12 @@ includes=(
   -Ilib/SlotMap
   -I"$gen_inc"
 )
+
+# Toolchain include paths and arch flags exported by environ.sh (newlib, sh-4, …).
+if [[ -n "${KOS_INC_PATHS:-}" ]]; then
+  # shellcheck disable=SC2206
+  includes+=(${KOS_INC_PATHS})
+fi
 
 # Pick a C++20 flag the installed KOS GCC accepts. Older KOS toolchains
 # (GCC 9/10) expose C++20 as -std=gnu++2a; newer ones accept -std=gnu++20.
