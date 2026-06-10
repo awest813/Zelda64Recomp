@@ -46,6 +46,7 @@ endif()
 # or can be passed manually via -DDREAMCAST=ON.
 if (DREAMCAST)
     add_compile_definitions(DREAMCAST)
+    add_compile_definitions(FMT_USE_LONG_DOUBLE=0)
     message(STATUS "Building for Sega Dreamcast (SH-4 / KallistiOS)")
 endif()
 
@@ -124,38 +125,7 @@ target_sources(PatchesLib PRIVATE
 
 set_source_files_properties(${CMAKE_SOURCE_DIR}/RecompiledPatches/patches.c PROPERTIES COMPILE_FLAGS -fno-strict-aliasing)
 
-# Build patches elf
-if(NOT DEFINED PATCHES_C_COMPILER)
-    set(PATCHES_C_COMPILER clang)
-endif()
-
-if(NOT DEFINED PATCHES_LD)
-    set(PATCHES_LD ld.lld)
-endif()
-
-add_custom_target(PatchesBin
-    COMMAND ${CMAKE_COMMAND} -E env CC=${PATCHES_C_COMPILER} LD=${PATCHES_LD} make
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/patches
-    BYPRODUCTS ${CMAKE_SOURCE_DIR}/patches/patches.elf
-)
-
-# Generate patches_bin.c from patches.bin
-add_custom_command(OUTPUT ${CMAKE_SOURCE_DIR}/RecompiledPatches/patches_bin.c
-    COMMAND file_to_c ${CMAKE_SOURCE_DIR}/patches/patches.bin mm_patches_bin ${CMAKE_SOURCE_DIR}/RecompiledPatches/patches_bin.c ${CMAKE_SOURCE_DIR}/RecompiledPatches/patches_bin.h
-    DEPENDS ${CMAKE_SOURCE_DIR}/patches/patches.bin
-)
-
-# Recompile patches elf into patches.c and patches.bin
-add_custom_command(OUTPUT
-                       ${CMAKE_SOURCE_DIR}/patches/patches.bin
-                       ${CMAKE_SOURCE_DIR}/RecompiledPatches/patches.c
-                       ${CMAKE_SOURCE_DIR}/RecompiledPatches/recomp_overlays.inl
-                       ${CMAKE_SOURCE_DIR}/RecompiledPatches/funcs.h
-                   # TODO: Look into why modifying patches requires two builds to take
-                   COMMAND ./N64Recomp patches.toml
-                   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                   DEPENDS ${CMAKE_SOURCE_DIR}/patches/patches.elf
-)
+# (Patches have been generated manually and are checked into source tree)
 
 # Main executable
 add_executable(Zelda64Recompiled)
@@ -301,10 +271,17 @@ endif()
 if (DREAMCAST)
     # Dreamcast: link only the core runtime libraries (no RT64, RmlUi, SDL, NFD)
     target_link_libraries(Zelda64Recompiled PRIVATE
+        -Wl,--allow-multiple-definition
         PatchesLib
         RecompiledFuncs
         librecomp
         ultramodern
+        miniz
+        -Wl,--start-group
+        kallisti
+        c
+        gcc
+        -Wl,--end-group
     )
 
     # Post-build: convert ELF to Dreamcast binary

@@ -38,15 +38,15 @@ fi
 # ── Locate the KOS environment ───────────────────────────────────────
 # environ.sh exports KOS_CC_BASE / KOS_CC_PREFIX / KOS_CFLAGS / KOS_INC_PATHS
 # and (in recent KOS) the kos-c++ wrapper. Source it if the caller hasn't.
-if [[ -z "${KOS_BASE:-}" ]]; then
-    for env_sh in /opt/toolchains/dc/kos/environ.sh "${KOS_BASE:-}/environ.sh"; do
-        if [[ -f "$env_sh" ]]; then
-            # shellcheck disable=SC1090
-            source "$env_sh"
-            break
-        fi
-    done
-fi
+set +u
+for env_sh in /opt/toolchains/dc/kos/environ.sh "${KOS_BASE:-}/environ.sh"; do
+    if [[ -f "$env_sh" ]]; then
+        # shellcheck disable=SC1090
+        source "$env_sh"
+        break
+    fi
+done
+set -u
 
 if [[ -z "${KOS_BASE:-}" ]]; then
     echo "error: KallistiOS environment not found (KOS_BASE unset)." >&2

@@ -32,6 +32,8 @@ extern "C" {
 #define MOODYCAMEL_LIGHTWEIGHTSEMAPHORE_MONOTONIC
 #endif
 #endif
+#elif defined(DREAMCAST)
+#include <kos/sem.h>
 #endif
 
 namespace moodycamel
@@ -254,48 +256,59 @@ public:
 	}
 };
 #elif defined(DREAMCAST)
-//---------------------------------------------------------
-// Semaphore (Dreamcast / KOS — no POSIX semaphores)
-//---------------------------------------------------------
 class Semaphore
 {
 private:
-	std::atomic<int> m_count;
+	semaphore_t m_sema;
 
 	Semaphore(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
 	Semaphore& operator=(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
 
 public:
-	Semaphore(int initialCount = 0) : m_count(initialCount) { assert(initialCount >= 0); }
+	Semaphore(int initialCount = 0)
+	{
+		assert(initialCount >= 0);
+		int rc = sem_init(&m_sema, initialCount);
+		assert(rc == 0);
+		(void)rc;
+	}
+
+	~Semaphore()
+	{
+		sem_destroy(&m_sema);
+	}
 
 	bool wait()
 	{
-		int expected;
-		do {
-			expected = m_count.load(std::memory_order_acquire);
-			while (expected <= 0) {
-				expected = m_count.load(std::memory_order_acquire);
-			}
-		} while (!m_count.compare_exchange_weak(expected, expected - 1, std::memory_order_acq_rel, std::memory_order_acquire));
-		return true;
+		return sem_wait(&m_sema) == 0;
 	}
 
 	bool try_wait()
 	{
-		int expected = m_count.load(std::memory_order_acquire);
-		while (expected > 0) {
-			if (m_count.compare_exchange_weak(expected, expected - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
-				return true;
-			}
-		}
-		return false;
+		return sem_trywait(&m_sema) == 0;
 	}
 
-	bool timed_wait(std::uint64_t) { return try_wait(); }
+	bool timed_wait(std::uint64_t usecs)
+	{
+		unsigned int ms = static_cast<unsigned int>(usecs / 1000);
+		if (usecs > 0 && ms == 0) {
+			ms = 1;
+		}
+		return sem_wait_timed(&m_sema, ms) == 0;
+	}
 
-	void signal() { m_count.fetch_add(1, std::memory_order_release); }
+	void signal()
+	{
+		sem_signal(&m_sema);
+	}
 
-	void signal(int count) { m_count.fetch_add(count, std::memory_order_release); }
+	void signal(int count)
+	{
+		while (count-- > 0)
+		{
+			sem_signal(&m_sema);
+		}
+	}
 };
 #else
 #error Unsupported platform! (No semaphore wrapper available)

@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iomanip>
 
+using json = nlohmann::json;
+
 #if defined(_WIN32)
 #include <Shlobj.h>
 #elif defined(__linux__)
