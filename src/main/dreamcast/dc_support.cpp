@@ -12,12 +12,17 @@
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/reent.h>
+#include <unistd.h>
 
 #include <kos.h>
 #include <dc/cdrom.h>
 #include <dc/vmu_pkg.h>
 #include <dc/maple.h>
 #include <dc/maple/vmu.h>
+#include <dc/vmufs.h>
 
 #include "zelda_support.h"
 #include "zelda_config.h"
@@ -125,7 +130,7 @@ bool vmu_load(const char* filename, void* data, size_t max_size, size_t* out_siz
 
     // Unpack VMS header
     vmu_pkg_t pkg;
-    if (vmu_pkg_parse(raw, &pkg) < 0) {
+    if (vmu_pkg_parse(raw, static_cast<size_t>(file_size), &pkg) < 0) {
         fprintf(stderr, "[DC] Failed to parse VMU package: %s\n", path);
         free(raw);
         return false;
@@ -147,20 +152,13 @@ bool vmu_delete(const char* filename) {
 }
 
 size_t vmu_free_blocks() {
-    // Query the first VMU (port A, unit 1) for its actual free block count.
-    // maple_dev_status() returns a pointer to a memcard_state_t whose
-    // 'free_blocks' field contains the number of available 512-byte blocks.
     maple_device_t* vmu = maple_enum_type(0, MAPLE_FUNC_MEMCARD);
     if (vmu == nullptr) {
         return 0;
     }
 
-    memcard_state_t* state = static_cast<memcard_state_t*>(maple_dev_status(vmu));
-    if (state == nullptr) {
-        return 0;
-    }
-
-    return static_cast<size_t>(state->free_blocks);
+    int blocks = vmufs_free_blocks(vmu);
+    return (blocks < 0) ? 0 : static_cast<size_t>(blocks);
 }
 
 // ── GD-ROM access ───────────────────────────────────────────────────
@@ -233,5 +231,42 @@ std::filesystem::path get_app_folder_path() {
 }
 
 } // namespace zelda64
+
+extern "C" {
+
+struct recomp_context;
+
+void recomp_run_ui_callbacks(uint8_t* rdram, struct recomp_context* ctx) {
+    (void)rdram;
+    (void)ctx;
+}
+
+unsigned int sleep(unsigned int seconds) {
+    thd_sleep(seconds * 1000);
+    return 0;
+}
+
+int usleep(unsigned int usec) {
+    thd_sleep(usec / 1000);
+    return 0;
+}
+
+int mkdir(const char *pathname, mode_t mode) {
+    (void)mode;
+    return fs_mkdir(pathname);
+}
+
+int fchmod(int fd, mode_t mode) {
+    (void)fd;
+    (void)mode;
+    return 0;
+}
+
+int _stat_r(struct _reent *reent, const char *path, struct stat *buf) {
+    (void)reent;
+    return fs_stat(path, buf, 0);
+}
+
+} // extern "C"
 
 #endif // DREAMCAST

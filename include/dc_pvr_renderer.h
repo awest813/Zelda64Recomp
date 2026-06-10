@@ -65,15 +65,6 @@ public:
     bool scene_active() const { return scene_active_; }
     bool drew_geometry() const { return drew_geometry_; }
 
-private:
-    struct ScreenMapping {
-        float offset_x = 0.0f;
-        float offset_y = 0.0f;
-        float scale = 1.0f;
-        uint16_t fb_width = 320;
-        uint16_t fb_height = 240;
-    };
-
     struct BatchKey {
         int list_type = -1;
         bool textured = false;
@@ -94,6 +85,15 @@ private:
         uint8_t cmt = 0;
 
         bool operator==(const BatchKey& other) const;
+    };
+
+private:
+    struct ScreenMapping {
+        float offset_x = 0.0f;
+        float offset_y = 0.0f;
+        float scale = 1.0f;
+        uint16_t fb_width = 320;
+        uint16_t fb_height = 240;
     };
 
     tex::Cache* texture_cache_ = nullptr;

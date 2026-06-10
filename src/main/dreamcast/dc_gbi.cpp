@@ -22,6 +22,8 @@
 
 #include "ultramodern/ultra64.h"
 
+namespace rdp = dreamcast::rdp;
+
 namespace {
 
 // ── F3DEX2 / F3DZEX2 Gfx opcodes ────────────────────────────────────
@@ -1350,14 +1352,14 @@ struct GbiState {
 
     static void dl_setothermode_h(GbiState& s, DisplayList*& dl) {
         const uint32_t size = dl->p0(0, 8) + 1;
-        const uint32_t off = static_cast<uint32_t>(std::max(0, static_cast<int32_t>(32 - dl->p0(8, 8) - size)));
+        const uint32_t off = static_cast<uint32_t>(std::max<int32_t>(0, static_cast<int32_t>(32 - dl->p0(8, 8) - size)));
         const uint32_t mask = ((1u << size) - 1u) << off;
         s.other_mode_h = (s.other_mode_h & ~mask) | ((dl->w1 << off) & mask);
     }
 
     static void dl_setothermode_l(GbiState& s, DisplayList*& dl) {
         const uint32_t size = dl->p0(0, 8) + 1;
-        const uint32_t off = static_cast<uint32_t>(std::max(0, static_cast<int32_t>(32 - dl->p0(8, 8) - size)));
+        const uint32_t off = static_cast<uint32_t>(std::max<int32_t>(0, static_cast<int32_t>(32 - dl->p0(8, 8) - size)));
         const uint32_t mask = ((1u << size) - 1u) << off;
         s.other_mode_l = (s.other_mode_l & ~mask) | ((dl->w1 << off) & mask);
     }

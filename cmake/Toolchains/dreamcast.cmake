@@ -43,14 +43,20 @@ set(KOS_SUBARCH "pristine")
 # ── Cross-compiler ───────────────────────────────────────────────────
 set(CROSS_PREFIX "${KOS_CC_BASE}/bin/sh-elf-")
 
-set(CMAKE_C_COMPILER   "${CROSS_PREFIX}gcc"   CACHE FILEPATH "" FORCE)
-set(CMAKE_CXX_COMPILER "${CROSS_PREFIX}g++"   CACHE FILEPATH "" FORCE)
-set(CMAKE_ASM_COMPILER "${CROSS_PREFIX}gcc"   CACHE FILEPATH "" FORCE)
-set(CMAKE_AR           "${CROSS_PREFIX}ar"     CACHE FILEPATH "" FORCE)
-set(CMAKE_RANLIB       "${CROSS_PREFIX}ranlib" CACHE FILEPATH "" FORCE)
-set(CMAKE_LINKER       "${CROSS_PREFIX}ld"     CACHE FILEPATH "" FORCE)
-set(CMAKE_OBJCOPY      "${CROSS_PREFIX}objcopy" CACHE FILEPATH "" FORCE)
-set(CMAKE_SIZE         "${CROSS_PREFIX}size"    CACHE FILEPATH "" FORCE)
+if(WIN32)
+    set(EXE_EXT ".exe")
+else()
+    set(EXE_EXT "")
+endif()
+
+set(CMAKE_C_COMPILER   "${CROSS_PREFIX}gcc${EXE_EXT}"   CACHE FILEPATH "" FORCE)
+set(CMAKE_CXX_COMPILER "${CROSS_PREFIX}g++${EXE_EXT}"   CACHE FILEPATH "" FORCE)
+set(CMAKE_ASM_COMPILER "${CROSS_PREFIX}gcc${EXE_EXT}"   CACHE FILEPATH "" FORCE)
+set(CMAKE_AR           "${CROSS_PREFIX}ar${EXE_EXT}"     CACHE FILEPATH "" FORCE)
+set(CMAKE_RANLIB       "${CROSS_PREFIX}ranlib${EXE_EXT}" CACHE FILEPATH "" FORCE)
+set(CMAKE_LINKER       "${CROSS_PREFIX}ld${EXE_EXT}"     CACHE FILEPATH "" FORCE)
+set(CMAKE_OBJCOPY      "${CROSS_PREFIX}objcopy${EXE_EXT}" CACHE FILEPATH "" FORCE)
+set(CMAKE_SIZE         "${CROSS_PREFIX}size${EXE_EXT}"    CACHE FILEPATH "" FORCE)
 
 # ── SH-4 CPU flags ──────────────────────────────────────────────────
 # -ml: little-endian SH-4
@@ -63,7 +69,6 @@ set(KOS_INC_DIRS
     "${KOS_BASE}/include"
     "${KOS_BASE}/kernel/arch/${KOS_ARCH}/include"
     "${KOS_BASE}/addons/include"
-    "${KOS_CC_BASE}/sh-elf/include"
 )
 
 set(KOS_LIB_DIRS

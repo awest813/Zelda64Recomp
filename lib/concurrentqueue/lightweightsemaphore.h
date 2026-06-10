@@ -32,6 +32,8 @@ extern "C" {
 #define MOODYCAMEL_LIGHTWEIGHTSEMAPHORE_MONOTONIC
 #endif
 #endif
+#elif defined(DREAMCAST)
+#include <kos/sem.h>
 #endif
 
 namespace moodycamel
@@ -250,6 +252,61 @@ public:
 		while (count-- > 0)
 		{
 			while (sem_post(&m_sema) == -1);
+		}
+	}
+};
+#elif defined(DREAMCAST)
+class Semaphore
+{
+private:
+	semaphore_t m_sema;
+
+	Semaphore(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
+	Semaphore& operator=(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
+
+public:
+	Semaphore(int initialCount = 0)
+	{
+		assert(initialCount >= 0);
+		int rc = sem_init(&m_sema, initialCount);
+		assert(rc == 0);
+		(void)rc;
+	}
+
+	~Semaphore()
+	{
+		sem_destroy(&m_sema);
+	}
+
+	bool wait()
+	{
+		return sem_wait(&m_sema) == 0;
+	}
+
+	bool try_wait()
+	{
+		return sem_trywait(&m_sema) == 0;
+	}
+
+	bool timed_wait(std::uint64_t usecs)
+	{
+		unsigned int ms = static_cast<unsigned int>(usecs / 1000);
+		if (usecs > 0 && ms == 0) {
+			ms = 1;
+		}
+		return sem_wait_timed(&m_sema, ms) == 0;
+	}
+
+	void signal()
+	{
+		sem_signal(&m_sema);
+	}
+
+	void signal(int count)
+	{
+		while (count-- > 0)
+		{
+			sem_signal(&m_sema);
 		}
 	}
 };

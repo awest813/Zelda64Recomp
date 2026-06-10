@@ -495,7 +495,9 @@ template <typename T, typename TKeyType = slot_map_key64<T>, size_t PAGESIZE = 4
             size_type alignment = std::max(static_cast<size_type>(alignof(Meta)), static_cast<size_type>(alignof(ValueStorage)));
             // some platforms (macOS) does not support alignments smaller than `alignof(void*)`
             // and 16 bytes seem like a nice compromise
-            alignment = std::max(alignment, 16u);
+            if (alignment < 16) {
+                alignment = 16;
+            }
             size_type numBytes = alignedDataSize + metaSize;
 
             /*

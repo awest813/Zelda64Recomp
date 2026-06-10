@@ -32,6 +32,7 @@
 #include "librecomp/mods.hpp"
 #include "librecomp/helpers.hpp"
 #include "dreamcast_platform.h"
+#include "recomp_ui.h"
 
 #include "../../patches/graphics.h"
 #include "../../patches/input.h"
@@ -181,6 +182,9 @@ int main(int argc, char** argv) {
     for (const auto& game : supported_games) {
         recomp::register_game(game);
     }
+
+    // Auto-start the game on boot for Dreamcast (Launcher is disabled)
+    recomp::start_game(supported_games[0].game_id);
 
     // Note: embedded mods are not loaded on Dreamcast since the mod system
     // is disabled. Only the base game is supported.

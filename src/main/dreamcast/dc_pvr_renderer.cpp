@@ -82,7 +82,7 @@ rdp::BlendState merge_blend(const rdp::BlendState& rdp_blend, bool vertex_transl
     return merge_blend(rdp_blend, vertex_translucent, argb, argb, argb);
 }
 
-void apply_blend_to_key(BatchKey& key, const rdp::BlendState& blend, bool zbuffer_enabled) {
+void apply_blend_to_key(Renderer::BatchKey& key, const rdp::BlendState& blend, bool zbuffer_enabled) {
     key.list_type = blend.list_type;
     key.translucent = blend.translucent;
     key.punch_through = blend.punch_through;
@@ -193,7 +193,7 @@ void Renderer::ensure_list(int list_type) {
 
     flush_batch();
     close_list();
-    pvr_list_begin(list_type);
+    pvr_list_begin(static_cast<pvr_list_t>(list_type));
     list_open_ = true;
     current_list_ = list_type;
     batch_hdr_valid_ = false;
@@ -266,10 +266,10 @@ void Renderer::begin_batch(const BatchKey& key) {
 
     pvr_poly_cxt_t cxt;
     if (key.textured) {
-        pvr_poly_cxt_txr(&cxt, key.list_type, key.pvr_format, key.tex_stride, key.tex_height, key.texture_vram, PVR_FILTER_NONE);
+        pvr_poly_cxt_txr(&cxt, static_cast<pvr_list_t>(key.list_type), key.pvr_format, key.tex_stride, key.tex_height, key.texture_vram, PVR_FILTER_NONE);
         apply_wrap_modes(cxt, key.cms, key.cmt);
     } else {
-        pvr_poly_cxt_col(&cxt, key.list_type);
+        pvr_poly_cxt_col(&cxt, static_cast<pvr_list_t>(key.list_type));
     }
 
     cxt.gen.shading = key.gouraud ? PVR_SHADE_GOURAUD : PVR_SHADE_FLAT;
