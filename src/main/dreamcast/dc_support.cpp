@@ -161,9 +161,9 @@ bool vmu_load(const char* filename, void* data, size_t max_size, size_t* out_siz
     fread(raw, 1, file_size, f);
     fclose(f);
 
-    // Unpack VMS header
+    // Unpack VMS header (KOS API: vmu_pkg_parse(buf, pkg)).
     vmu_pkg_t pkg;
-    if (vmu_pkg_parse(raw, static_cast<size_t>(file_size), &pkg) < 0) {
+    if (vmu_pkg_parse(raw, &pkg) < 0) {
         fprintf(stderr, "[DC] Failed to parse VMU package: %s\n", path);
         free(raw);
         return false;
@@ -589,11 +589,6 @@ void recomp_run_ui_callbacks(uint8_t* rdram, struct recomp_context* ctx) {
 
 unsigned int sleep(unsigned int seconds) {
     thd_sleep(seconds * 1000);
-    return 0;
-}
-
-int usleep(unsigned int usec) {
-    thd_sleep(usec / 1000);
     return 0;
 }
 

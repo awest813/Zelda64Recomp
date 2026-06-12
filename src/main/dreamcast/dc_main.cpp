@@ -173,8 +173,8 @@ constexpr size_t ROM_HEADER_BYTES = 0x1000;
 
 // In-place de-byteswap for .v64 (16-bit swapped) and .n64 (32-bit swapped)
 // dumps so users do not have to convert their ROM to .z64 by hand.
-void byteswap_rom(std::vector<uint8_t>& data, size_t stride) {
-    for (size_t i = 0; i + stride <= data.size(); i += stride) {
+void byteswap_rom(uint8_t* data, size_t size, size_t stride) {
+    for (size_t i = 0; i + stride <= size; i += stride) {
         for (size_t j = 0; j < stride / 2; j++) {
             std::swap(data[i + j], data[i + stride - 1 - j]);
         }
@@ -208,10 +208,10 @@ bool dc_boot_load_rom() {
         case 0x80371240u:
             break;
         case 0x37804012u:
-            byteswap_rom(header, 2);
+            byteswap_rom(header.data(), header.size(), 2);
             break;
         case 0x40123780u:
-            byteswap_rom(header, 4);
+            byteswap_rom(header.data(), header.size(), 4);
             break;
         default:
             recompui::show_error_screen("Invalid ROM",
