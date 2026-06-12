@@ -32,7 +32,12 @@
 | Host-side N64Recomp / RSPRecomp codegen | ✅ | Requires ROM + generated `RecompiledFuncs/` (not in repo) |
 | GD-ROM disc image workflow (`tools/dreamcast/make_disc.sh` + `dc_disc` target) | ✅ | Wraps `mkdcdisc`; stages `rom.z64` at disc root |
 | Dreamcast CI / automated builds | 🟡 | `dreamcast.yml` syntax-checks all DC sources with the KOS SH-4 toolchain on push/PR; full link needs ROM-derived codegen (out of CI scope) |
-| sh4zam optimized matrix math (`-DDC_HAS_SH4ZAM`) | 🟡 | Optional; off by default |
+| sh4zam (MIT) — matrix, fog, audio when kos-ports lib present | ✅ | Auto-linked via `DC_SH4ZAM_FOUND`; `-O3` hot paths |
+| LTO + `-Os` global / `-O3` renderer hot files (SM64 discipline) | ✅ | `dreamcast.cmake` + per-file properties in `CMakeLists.txt` |
+| RAM telemetry (`mallinfo` boot + periodic VI logs) | ✅ | `dc_ram.cpp`; logs every 5 s and every 300 frames |
+| 30 fps frame limiter | ✅ | `PVRContext::update_screen()` after present |
+| Fixed texture overrides (`/cd/fixed_textures/*.dt`) | 🟡 | Runtime hook in `dc_texture_cache`; assets TBD per playtest |
+| GBI opcode diff vs SM64 (`compare_gbi_dispatch.py`) | ✅ | Run when hardware logs unimplemented opcodes |
 
 ### Core runtime
 
@@ -148,7 +153,7 @@
 
 | Feature | Status | Remains |
 |---------|--------|---------|
-| 16 MB RAM footprint | ❓ | No profiling data; likely needs optimization |
+| 16 MB RAM footprint | 🟡 | `mallinfo` telemetry at boot + periodic; tune after hardware profiling |
 | 200 MHz SH-4 frame rate | ❓ | Target unknown; may require LOD / culling / GBI tuning |
 | VRAM texture cache pressure | ❓ | 3 MB budget; eviction behavior under heavy scenes untested |
 | Real-hardware test pass | ❌ | No test matrix or hardware CI |

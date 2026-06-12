@@ -18,6 +18,10 @@
 #include <kos.h>
 #include <dc/sound/stream.h>
 
+#if defined(DC_HAS_SH4ZAM)
+#include <sh4zam/shz_fmath.h>
+#endif
+
 #include "dreamcast_platform.h"
 #include "zelda_sound.h"
 
@@ -129,8 +133,13 @@ void aica_queue_samples(const int16_t* samples, size_t sample_count) {
         int32_t right = static_cast<int32_t>(samples[i + 0]);
 
         // Apply volume
+#if defined(DC_HAS_SH4ZAM)
+        left  = static_cast<int32_t>(shz_fmaf(static_cast<float>(left), volume_scale, 0.0f));
+        right = static_cast<int32_t>(shz_fmaf(static_cast<float>(right), volume_scale, 0.0f));
+#else
         left  = static_cast<int32_t>(left * volume_scale);
         right = static_cast<int32_t>(right * volume_scale);
+#endif
 
         // Clamp
         if (left > 32767) left = 32767;

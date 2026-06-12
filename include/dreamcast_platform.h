@@ -48,6 +48,8 @@
 // GD-ROM paths
 #define DC_ROM_PATH         "/cd/rom.z64"
 #define DC_ASSET_BASE_PATH  "/cd/assets/"
+// Hand-tuned PVR replacements keyed by FNV-1a of staged TMEM (SM64 fixed-textures workflow).
+#define DC_FIXED_TEXTURE_PATH "/cd/fixed_textures/"
 #define DC_SAVE_PATH_PREFIX "/vmu/a1/"
 
 // Working storage lives on the KOS ramdisk because the VMU filesystem is

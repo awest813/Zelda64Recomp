@@ -37,6 +37,7 @@
 #include "librecomp/mods.hpp"
 #include "librecomp/helpers.hpp"
 #include "dreamcast_platform.h"
+#include "dc_ram.h"
 #include "recomp_ui.h"
 
 #include "../../patches/graphics.h"
@@ -258,6 +259,13 @@ bool dc_boot_load_rom() {
 void dc_vi_callback() {
     recomp::update_rumble();
     dreamcast::storage_poll();
+
+    static uint64_t last_ram_log_ms = 0;
+    const uint64_t now = timer_ms_gettime64();
+    if (now - last_ram_log_ms >= 5000) {
+        dreamcast::ram::log_status(" periodic");
+        last_ram_log_ms = now;
+    }
 }
 
 } // anonymous namespace

@@ -38,6 +38,7 @@
 #include "zelda_config.h"
 #include "recomp_ui.h"
 #include "dreamcast_platform.h"
+#include "dc_ram.h"
 
 extern "C" {
 #include "xxHash/xxh3.h"
@@ -62,9 +63,13 @@ namespace dreamcast {
 void platform_init() {
     fprintf(stdout, "[DC] Platform initializing...\n");
 
+    ram::init();
+    ram::log_status(" boot");
+
     // Initialize the CD-ROM filesystem for reading the game ROM
     // The GD-ROM should already be accessible via /cd/ after KOS init
     fprintf(stdout, "[DC] GD-ROM filesystem available at /cd/\n");
+    fprintf(stdout, "[DC] Fixed texture overrides: %s\n", DC_FIXED_TEXTURE_PATH);
     fprintf(stdout, "[DC] Working storage: %s (mirrored to VMU %s%s)\n",
             DC_RAM_STORAGE_PATH, DC_SAVE_PATH_PREFIX, DC_VMU_MIRROR_FILE);
     fprintf(stdout, "[DC] Platform initialized\n");

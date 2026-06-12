@@ -3,6 +3,7 @@
 #ifdef DREAMCAST
 
 #include "dc_texture_cache.h"
+#include "dc_fixed_texture.h"
 
 // Older KOS headers name this flag PVR_TXRFMT_STRIDE.
 #ifndef PVR_TXRFMT_X32_STRIDE
@@ -281,11 +282,12 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
         height = std::min(height, tile_h);
     }
 
-    const uint32_t stride = align_up(width, 32);
+    uint32_t stride = align_up(width, 32);
 
     std::vector<uint16_t> pixels(static_cast<size_t>(stride) * height, 0);
     const size_t pixel_count = static_cast<size_t>(width) * height;
 
+    if (!try_load_fixed_texture(hash, tile.fmt, tile.siz, width, height, pixels, stride, surface.pvr_format)) {
     switch (tile.fmt) {
     case G_IM_FMT_RGBA:
         if (tile.siz == G_IM_SIZ_16b) {
@@ -382,6 +384,7 @@ Surface Cache::upload(const LoadedTexture& tex, const TileState& tile, const uin
         break;
     default:
         return surface;
+    }
     }
 
     if (surface.pvr_format == 0) {

@@ -188,6 +188,8 @@ if (DREAMCAST)
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_texture_cache.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_support.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_ram.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_fixed_texture.cpp
         ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_input.cpp
         ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_config.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/dreamcast/dc_ui.cpp
@@ -270,6 +272,20 @@ if (DREAMCAST)
     target_compile_options(Zelda64Recompiled PRIVATE
         -fno-strict-aliasing
     )
+
+    # SM64 DC: -O3 on renderer/audio hot paths while the global build uses -Os -flto.
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_gbi.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_pvr_renderer.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_texture_cache.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp
+        PROPERTIES COMPILE_OPTIONS "-O3"
+    )
+
+    if (DC_SH4ZAM_FOUND)
+        target_compile_definitions(Zelda64Recompiled PRIVATE DC_HAS_SH4ZAM=1)
+        target_link_libraries(Zelda64Recompiled PRIVATE sh4zam)
+    endif()
 elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     target_compile_options(Zelda64Recompiled PRIVATE
         -march=nehalem
