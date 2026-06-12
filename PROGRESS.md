@@ -4,7 +4,7 @@
 
 **Target:** Sega Dreamcast (SH-4 @ 200 MHz, 16 MB RAM, 8 MB VRAM) via [KallistiOS](https://github.com/KallistiOS/KallistiOS).
 
-**Last updated:** 2026-06-09
+**Last updated:** 2026-06-12
 
 ---
 
@@ -53,7 +53,7 @@
 | Feature | Status | Remains |
 |---------|--------|---------|
 | KOS entry point (`dc_main.cpp`) | ✅ | — |
-| Auto-boot from `/cd/rom.z64` (header check, byteswap, `set_rom_contents` + `start_game`) | ✅ | No launcher; `make_disc.sh` stages the ROM. **Whole ROM is loaded into RAM** — see Performance |
+| Auto-boot from `/cd/rom.z64` (header check, byteswap, streamed PI reads + `start_game`) | ✅ | No launcher; `make_disc.sh` stages the ROM. ROM is validated on boot (header + XXH3 hash) then read on demand from GD-ROM via `set_rom_stream` |
 | File picker / ROM selection UI | ➖ | Auto-loads fixed path; no dialog |
 | Error display to player | ✅ | Full-screen BIOS-font error screens (`show_error_screen`); missing/wrong ROM, OOM, VMU failures all render on screen |
 | Version string (`1.2.2-dc`) | ✅ | — |
@@ -182,8 +182,8 @@ Ordered by dependency. Items marked **blocker** must be resolved before the port
 | 2 | **In-game rendering correctness** | Blocker | Fix GBI gaps found during play (unimplemented opcodes now logged once on stderr) |
 | 3 | **Performance / RAM** | Blocker | Profile on SH-4; optimize hot paths, texture budget, frame pacing |
 | 4 | **Playthrough validation** | Blocker | Title → Clock Town → dungeons → major scenes without crash/hang |
-| 4a | **Streamed ROM access (PI)** | Blocker | The 32 MB ROM is loaded whole into 16 MB RAM (`set_rom_contents`); needs GD-ROM streaming in librecomp (upstream fork) to be viable on hardware. Boot fails gracefully with an on-screen OOM error today |
-| 4b | **librecomp portability on KOS** | Blocker | `recomp::start()` allocates rdram via anonymous `mmap`; KOS support unverified. Full DC link of librecomp has never been exercised (CI is syntax-only) |
+| 4a | **Streamed ROM access (PI)** | High | Implemented: boot validates `rom.z64` on GD-ROM (header + hash) and registers streamed PI reads (`set_rom_stream`); no full-ROM RAM buffer. Hardware-verify DMA read performance |
+| 4b | **librecomp portability on KOS** | High | RDRAM now uses a 14 MB `calloc` buffer on Dreamcast instead of 4 GB `mmap`; heap starts at `0x80900000`. Full DC link still needs ROM-derived codegen; CI remains syntax-only |
 | 5 | **VMU save/load in real play** | High | Verify autosave + manual save across power cycle |
 | 6 | **Audio sync & dropouts** | High | Stress AICA buffer under load |
 | 7 | **On-screen error reporting** | Medium | Done — `show_error_screen()` (blocking, BIOS font) + notification toasts; VMU-write failures raise a toast |

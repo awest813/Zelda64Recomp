@@ -34,6 +34,10 @@ librecomp_patch="$repo_root/.github/dreamcast/librecomp-gcc9.patch"
 if [[ -f "$librecomp_patch" ]]; then
     patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$librecomp_patch" || true
 fi
+librecomp_dc_patch="$repo_root/.github/dreamcast/librecomp-dreamcast.patch"
+if [[ -f "$librecomp_dc_patch" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$librecomp_dc_patch" || true
+fi
 
 # ── Locate the KOS environment ───────────────────────────────────────
 # environ.sh exports KOS_CC_BASE / KOS_CC_PREFIX / KOS_CFLAGS / KOS_INC_PATHS

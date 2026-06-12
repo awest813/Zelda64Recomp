@@ -114,7 +114,7 @@ tools/dreamcast/make_disc.sh \
     -o zelda64recomp.cdi
 ```
 
-The script stages the ROM at the disc root as `rom.z64` (the path the game loads at boot) and optionally adds an asset directory with `-a`. Alternatively, configure with `-DDC_ROM_FOR_DISC=/path/to/rom.z64` and run `cmake --build build-dreamcast --target dc_disc`.
+The script stages the ROM at the disc root as `rom.z64` (the path the game loads at boot) and optionally adds an asset directory with `-a`. The ROM must be a big-endian `.z64` image (not `.v64`/`.n64` byte-swapped dumps) because PI reads are streamed directly from the file. Alternatively, configure with `-DDC_ROM_FOR_DISC=/path/to/rom.z64` and run `cmake --build build-dreamcast --target dc_disc`.
 
 The resulting `.cdi` boots in Flycast/lxdream or can be burned for a real console. At boot the game auto-loads `/cd/rom.z64` (no launcher); a missing or wrong ROM shows an on-screen error. Saves and config are mirrored to a VMU in slot A1 as a single `ZELDA64.SAV` file.
 

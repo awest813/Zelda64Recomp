@@ -48,6 +48,32 @@ if (DREAMCAST)
     add_compile_definitions(DREAMCAST)
     add_compile_definitions(FMT_USE_LONG_DOUBLE=0)
     message(STATUS "Building for Sega Dreamcast (SH-4 / KallistiOS)")
+
+    # Apply KOS/GCC compatibility and Dreamcast-specific librecomp patches before
+    # the N64ModernRuntime sub-build picks up the sources.
+    set(DC_PATCH_DIR "${CMAKE_SOURCE_DIR}/.github/dreamcast")
+    foreach(dc_patch IN ITEMS ultramodern-gcc9.patch librecomp-gcc9.patch librecomp-dreamcast.patch)
+        if (EXISTS "${DC_PATCH_DIR}/${dc_patch}")
+            execute_process(
+                COMMAND patch -p1 --forward -i "${DC_PATCH_DIR}/${dc_patch}"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime"
+                RESULT_VARIABLE dc_patch_result
+            )
+            if (dc_patch_result GREATER 1)
+                message(FATAL_ERROR "Failed to apply Dreamcast patch: ${dc_patch}")
+            endif()
+        endif()
+    endforeach()
+    if (EXISTS "${DC_PATCH_DIR}/recomp-sh4.patch")
+        execute_process(
+            COMMAND patch -p1 --forward -i "${DC_PATCH_DIR}/recomp-sh4.patch"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime/N64Recomp"
+            RESULT_VARIABLE dc_patch_result
+        )
+        if (dc_patch_result GREATER 1)
+            message(FATAL_ERROR "Failed to apply Dreamcast patch: recomp-sh4.patch")
+        endif()
+    endif()
 endif()
 
 if (NOT DREAMCAST)
