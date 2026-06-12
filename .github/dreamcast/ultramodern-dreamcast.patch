@@ -1,0 +1,19 @@
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 812c556..fa23f62 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -144,6 +144,14 @@ void ultramodern::set_native_thread_name(const std::string& name) {
+ }
+ 
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
++#elif defined(DREAMCAST)
++void ultramodern::set_native_thread_name(const std::string& name) {
++    (void)name;
++}
++
++void ultramodern::set_native_thread_priority(ThreadPriority pri) {
++    (void)pri;
++}
+ #endif
+ 
+ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {

@@ -183,7 +183,7 @@ Ordered by dependency. Items marked **blocker** must be resolved before the port
 | 3 | **Performance / RAM** | Blocker | Profile on SH-4; optimize hot paths, texture budget, frame pacing |
 | 4 | **Playthrough validation** | Blocker | Title → Clock Town → dungeons → major scenes without crash/hang |
 | 4a | **Streamed ROM access (PI)** | High | Implemented: boot validates `rom.z64` on GD-ROM (header + hash) and registers streamed PI reads (`set_rom_stream`); no full-ROM RAM buffer. Hardware-verify DMA read performance |
-| 4b | **librecomp portability on KOS** | High | RDRAM now uses a 14 MB `calloc` buffer on Dreamcast instead of 4 GB `mmap`; heap starts at `0x80900000`. Full DC link still needs ROM-derived codegen; CI remains syntax-only |
+| 4b | **librecomp portability on KOS** | High | RDRAM uses 14 MB `calloc`; mods/mprotect/dlopen stubbed for SH-4; thread naming stubbed. Full DC link still needs ROM-derived codegen; CI remains syntax-only |
 | 5 | **VMU save/load in real play** | High | Verify autosave + manual save across power cycle |
 | 6 | **Audio sync & dropouts** | High | Stress AICA buffer under load |
 | 7 | **On-screen error reporting** | Medium | Done — `show_error_screen()` (blocking, BIOS font) + notification toasts; VMU-write failures raise a toast |

@@ -52,7 +52,7 @@ if (DREAMCAST)
     # Apply KOS/GCC compatibility and Dreamcast-specific librecomp patches before
     # the N64ModernRuntime sub-build picks up the sources.
     set(DC_PATCH_DIR "${CMAKE_SOURCE_DIR}/.github/dreamcast")
-    foreach(dc_patch IN ITEMS ultramodern-gcc9.patch librecomp-gcc9.patch librecomp-dreamcast.patch)
+    foreach(dc_patch IN ITEMS ultramodern-gcc9.patch ultramodern-dreamcast.patch librecomp-gcc9.patch librecomp-dreamcast.patch)
         if (EXISTS "${DC_PATCH_DIR}/${dc_patch}")
             execute_process(
                 COMMAND patch -p1 --forward -i "${DC_PATCH_DIR}/${dc_patch}"

@@ -26,6 +26,10 @@ patch_file="$repo_root/.github/dreamcast/ultramodern-gcc9.patch"
 if [[ -f "$patch_file" ]]; then
     patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$patch_file" || true
 fi
+ultramodern_dc_patch="$repo_root/.github/dreamcast/ultramodern-dreamcast.patch"
+if [[ -f "$ultramodern_dc_patch" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$ultramodern_dc_patch" || true
+fi
 recomp_patch="$repo_root/.github/dreamcast/recomp-sh4.patch"
 if [[ -f "$recomp_patch" ]]; then
     patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime/N64Recomp" < "$recomp_patch" || true

@@ -295,9 +295,6 @@ int main(int argc, char** argv) {
         recomp::register_game(game);
     }
 
-    // Auto-start the game on boot for Dreamcast (Launcher is disabled)
-    recomp::start_game(supported_games[0].game_id);
-
     // Note: embedded mods are not loaded on Dreamcast since the mod system
     // is disabled. Only the base game is supported.
 
