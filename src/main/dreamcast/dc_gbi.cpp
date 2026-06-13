@@ -21,7 +21,7 @@
 #include <vector>
 
 #if defined(DC_HAS_SH4ZAM)
-#include <sh4zam/shz_fmath.h>
+#include <sh4zam/shz_scalar.h>
 #endif
 
 #include "ultramodern/ultra64.h"

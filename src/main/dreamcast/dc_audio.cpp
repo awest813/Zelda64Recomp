@@ -19,7 +19,7 @@
 #include <dc/sound/stream.h>
 
 #if defined(DC_HAS_SH4ZAM)
-#include <sh4zam/shz_fmath.h>
+#include <sh4zam/shz_scalar.h>
 #endif
 
 #include "dreamcast_platform.h"

@@ -177,7 +177,7 @@ std::atomic<bool> suppress_stored_rom_error{false};
 std::mutex toast_mutex;
 std::string toast_text;
 int toast_frames_remaining = 0;
-constexpr int TOAST_DURATION_FRAMES = 300; // ~5 s at 60 Hz
+constexpr int TOAST_DURATION_FRAMES = 150; // ~5 s at 30 Hz (matches PVR frame limiter)
 
 } // anonymous namespace
 
