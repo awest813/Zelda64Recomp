@@ -48,6 +48,8 @@
 // GD-ROM paths
 #define DC_ROM_PATH         "/cd/rom.z64"
 #define DC_ASSET_BASE_PATH  "/cd/assets/"
+// Hand-tuned PVR replacements keyed by FNV-1a of staged TMEM (SM64 fixed-textures workflow).
+#define DC_FIXED_TEXTURE_PATH "/cd/fixed_textures/"
 #define DC_SAVE_PATH_PREFIX "/vmu/a1/"
 
 // Working storage lives on the KOS ramdisk because the VMU filesystem is
@@ -94,6 +96,9 @@ namespace dreamcast {
     bool gdrom_file_exists(const char* path);
     size_t gdrom_file_size(const char* path);
     bool gdrom_read_file(const char* path, void* buffer, size_t size);
+    bool gdrom_read_file_at(const char* path, size_t offset, void* buffer, size_t size);
+    // Incremental XXH3-64 over a GD-ROM file (for ROM validation without loading into RAM).
+    bool gdrom_file_xxh3_64(const char* path, size_t size, uint64_t* out_hash);
 
     // ── RAM-backed storage with VMU mirroring ───────────────────────
     // Saves and config JSON are written by the shared (librecomp / config.cpp)
@@ -134,11 +139,9 @@ namespace recompui {
     // headless/disconnected console does not hang forever).
     void show_error_screen(const char* title, const char* message);
 
-    // The Dreamcast boot path loads the ROM itself (recomp::set_rom_contents)
-    // because librecomp's "stored ROM" lives under the config path, which is
-    // not writable storage big enough for a ROM on this platform. librecomp
-    // still tries to load the stored ROM and reports a spurious error; this
-    // arms a one-shot filter that downgrades that message box to a log line.
+    // The Dreamcast boot path validates the ROM on GD-ROM and registers it for
+    // streamed PI reads (`set_rom_stream`) because holding a 32 MB image in
+    // 16 MB of main RAM is not viable.
     void dc_suppress_next_stored_rom_error();
 }
 

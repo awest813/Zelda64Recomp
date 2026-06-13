@@ -177,7 +177,7 @@ std::atomic<bool> suppress_stored_rom_error{false};
 std::mutex toast_mutex;
 std::string toast_text;
 int toast_frames_remaining = 0;
-constexpr int TOAST_DURATION_FRAMES = 300; // ~5 s at 60 Hz
+constexpr int TOAST_DURATION_FRAMES = 150; // ~5 s at 30 Hz (matches PVR frame limiter)
 
 } // anonymous namespace
 
@@ -462,10 +462,9 @@ void dc_suppress_next_stored_rom_error() {
 }
 
 void message_box(const char* msg) {
-    // The Dreamcast boot path loads the ROM directly from GD-ROM with
-    // set_rom_contents(); librecomp's load_stored_rom() still runs and fails
-    // (there is no stored-ROM copy on this platform), so filter that one
-    // expected complaint instead of blocking boot with a bogus error screen.
+    // Legacy safety net: if librecomp still complains about a missing stored ROM
+    // on Dreamcast (boot uses streamed PI reads via set_rom_stream), downgrade
+    // that one expected message instead of blocking with a bogus error screen.
     if (suppress_stored_rom_error.exchange(false) && strstr(msg, "stored ROM") != nullptr) {
         fprintf(stdout, "[DC UI] suppressed expected message: %s\n", msg);
         return;

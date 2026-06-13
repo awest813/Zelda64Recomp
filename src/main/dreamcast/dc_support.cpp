@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -37,6 +38,11 @@
 #include "zelda_config.h"
 #include "recomp_ui.h"
 #include "dreamcast_platform.h"
+#include "dc_ram.h"
+
+extern "C" {
+#include "xxHash/xxh3.h"
+}
 
 // ── Platform init / shutdown ────────────────────────────────────────
 
@@ -57,9 +63,13 @@ namespace dreamcast {
 void platform_init() {
     fprintf(stdout, "[DC] Platform initializing...\n");
 
+    ram::init();
+    ram::log_status(" boot");
+
     // Initialize the CD-ROM filesystem for reading the game ROM
     // The GD-ROM should already be accessible via /cd/ after KOS init
     fprintf(stdout, "[DC] GD-ROM filesystem available at /cd/\n");
+    fprintf(stdout, "[DC] Fixed texture overrides: %s\n", DC_FIXED_TEXTURE_PATH);
     fprintf(stdout, "[DC] Working storage: %s (mirrored to VMU %s%s)\n",
             DC_RAM_STORAGE_PATH, DC_SAVE_PATH_PREFIX, DC_VMU_MIRROR_FILE);
     fprintf(stdout, "[DC] Platform initialized\n");
@@ -151,9 +161,9 @@ bool vmu_load(const char* filename, void* data, size_t max_size, size_t* out_siz
     fread(raw, 1, file_size, f);
     fclose(f);
 
-    // Unpack VMS header
+    // Unpack VMS header (KOS API: vmu_pkg_parse(buf, pkg)).
     vmu_pkg_t pkg;
-    if (vmu_pkg_parse(raw, static_cast<size_t>(file_size), &pkg) < 0) {
+    if (vmu_pkg_parse(raw, &pkg) < 0) {
         fprintf(stderr, "[DC] Failed to parse VMU package: %s\n", path);
         free(raw);
         return false;
@@ -210,6 +220,62 @@ bool gdrom_read_file(const char* path, void* buffer, size_t size) {
     size_t read = fread(buffer, 1, size, f);
     fclose(f);
     return (read == size);
+}
+
+bool gdrom_read_file_at(const char* path, size_t offset, void* buffer, size_t size) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = false;
+    if (fseek(f, static_cast<long>(offset), SEEK_SET) == 0) {
+        ok = fread(buffer, 1, size, f) == size;
+    }
+    fclose(f);
+    return ok;
+}
+
+bool gdrom_file_xxh3_64(const char* path, size_t size, uint64_t* out_hash) {
+    if (out_hash == nullptr) {
+        return false;
+    }
+
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        return false;
+    }
+
+    XXH3_state_t* state = XXH3_createState();
+    if (state == nullptr) {
+        fclose(f);
+        return false;
+    }
+    if (XXH3_64bits_reset(state) != XXH_OK) {
+        XXH3_freeState(state);
+        fclose(f);
+        return false;
+    }
+
+    std::array<uint8_t, 64 * 1024> chunk{};
+    size_t remaining = size;
+    while (remaining > 0) {
+        const size_t to_read = (remaining < chunk.size()) ? remaining : chunk.size();
+        const size_t read = fread(chunk.data(), 1, to_read, f);
+        if (read != to_read) {
+            XXH3_freeState(state);
+            fclose(f);
+            return false;
+        }
+        if (XXH3_64bits_update(state, chunk.data(), read) != XXH_OK) {
+            XXH3_freeState(state);
+            fclose(f);
+            return false;
+        }
+        remaining -= read;
+    }
+
+    *out_hash = XXH3_64bits_digest(state);
+    XXH3_freeState(state);
+    fclose(f);
+    return true;
 }
 
 } // namespace dreamcast
@@ -523,11 +589,6 @@ void recomp_run_ui_callbacks(uint8_t* rdram, struct recomp_context* ctx) {
 
 unsigned int sleep(unsigned int seconds) {
     thd_sleep(seconds * 1000);
-    return 0;
-}
-
-int usleep(unsigned int usec) {
-    thd_sleep(usec / 1000);
     return 0;
 }
 

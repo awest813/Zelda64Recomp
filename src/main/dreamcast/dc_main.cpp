@@ -14,6 +14,8 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <filesystem>
+#include <array>
 
 #include <kos.h>
 #include <dc/maple.h>
@@ -35,6 +37,7 @@
 #include "librecomp/mods.hpp"
 #include "librecomp/helpers.hpp"
 #include "dreamcast_platform.h"
+#include "dc_ram.h"
 #include "recomp_ui.h"
 
 #include "../../patches/graphics.h"
@@ -159,17 +162,19 @@ void reorder_texture_pack(recomp::mods::ModContext&) {}
 
 // ── Boot-time ROM loading ───────────────────────────────────────────
 // There is no launcher UI on Dreamcast, so nothing would ever call
-// recomp::select_rom() / recomp::start_game(). Instead, load the ROM from
-// the fixed GD-ROM path, hand it to librecomp directly, and start the game
-// before entering recomp::start() (whose game thread then proceeds
-// immediately instead of waiting for a launcher).
+// recomp::select_rom() / recomp::start_game(). Instead, validate the ROM on
+// GD-ROM, register it for streamed PI reads, and start the game before
+// entering recomp::start() (whose game thread then proceeds immediately
+// instead of waiting for a launcher).
 
 namespace {
 
+constexpr size_t ROM_HEADER_BYTES = 0x1000;
+
 // In-place de-byteswap for .v64 (16-bit swapped) and .n64 (32-bit swapped)
 // dumps so users do not have to convert their ROM to .z64 by hand.
-void byteswap_rom(std::vector<uint8_t>& data, size_t stride) {
-    for (size_t i = 0; i + stride <= data.size(); i += stride) {
+void byteswap_rom(uint8_t* data, size_t size, size_t stride) {
+    for (size_t i = 0; i + stride <= size; i += stride) {
         for (size_t j = 0; j < stride / 2; j++) {
             std::swap(data[i + j], data[i + stride - 1 - j]);
         }
@@ -180,7 +185,7 @@ bool dc_boot_load_rom() {
     const size_t rom_size = dreamcast::gdrom_file_size(DC_ROM_PATH);
     // MM US 1.0 is 32 MB; require at least the 4 KB header region so an
     // empty or placeholder file is rejected up front.
-    if (rom_size < 0x1000) {
+    if (rom_size < ROM_HEADER_BYTES) {
         recompui::show_error_screen(
             "ROM Not Found",
             "Could not read rom.z64 from the disc.\n\n"
@@ -189,38 +194,24 @@ bool dc_boot_load_rom() {
         return false;
     }
 
-    std::vector<uint8_t> rom_data;
-    // 16 MB main RAM cannot hold the 32 MB ROM; until streamed PI reads from
-    // GD-ROM are implemented this allocation is expected to fail on real
-    // hardware. Fail with a readable explanation instead of an abort.
-    try {
-        rom_data.resize((rom_size + 3) & ~size_t{3});
-    } catch (const std::bad_alloc&) {
-        recompui::show_error_screen(
-            "Out of Memory",
-            "Not enough RAM to load the ROM image.\n\n"
-            "The Dreamcast port currently requires the whole ROM in memory; "
-            "streamed GD-ROM reads are not implemented yet (see PROGRESS.md).");
-        return false;
-    }
-
-    if (!dreamcast::gdrom_read_file(DC_ROM_PATH, rom_data.data(), rom_size)) {
+    std::array<uint8_t, ROM_HEADER_BYTES> header{};
+    if (!dreamcast::gdrom_read_file_at(DC_ROM_PATH, 0, header.data(), header.size())) {
         recompui::show_error_screen("Disc Read Error",
                                     "Failed to read rom.z64 from the disc.");
         return false;
     }
 
     // Identify byte order from the first word (big-endian z64 is 0x80371240).
-    const uint32_t first_word = (uint32_t(rom_data[0]) << 24) | (uint32_t(rom_data[1]) << 16) |
-                                (uint32_t(rom_data[2]) << 8) | uint32_t(rom_data[3]);
+    const uint32_t first_word = (uint32_t(header[0]) << 24) | (uint32_t(header[1]) << 16) |
+                                (uint32_t(header[2]) << 8) | uint32_t(header[3]);
     switch (first_word) {
         case 0x80371240u:
             break;
         case 0x37804012u:
-            byteswap_rom(rom_data, 2);
+            byteswap_rom(header.data(), header.size(), 2);
             break;
         case 0x40123780u:
-            byteswap_rom(rom_data, 4);
+            byteswap_rom(header.data(), header.size(), 4);
             break;
         default:
             recompui::show_error_screen("Invalid ROM",
@@ -230,7 +221,7 @@ bool dc_boot_load_rom() {
 
     // Match the registered game by internal name (offset 0x20).
     const auto& game = supported_games[0];
-    if (memcmp(rom_data.data() + 0x20, game.internal_name.c_str(), game.internal_name.size()) != 0) {
+    if (memcmp(header.data() + 0x20, game.internal_name.c_str(), game.internal_name.size()) != 0) {
         recompui::show_error_screen(
             "Wrong ROM",
             "The ROM on the disc is not Majora's Mask (US).\n\n"
@@ -238,12 +229,28 @@ bool dc_boot_load_rom() {
         return false;
     }
 
-    fprintf(stdout, "[DC] Loaded ROM from %s (%zu bytes)\n", DC_ROM_PATH, rom_size);
-    recomp::set_rom_contents(std::move(rom_data));
-    // librecomp's load_stored_rom() will still run and fail (the ROM is not
-    // re-stored under the config path on this platform); silence that one
-    // expected complaint.
-    recompui::dc_suppress_next_stored_rom_error();
+    // Hash the full ROM from GD-ROM without keeping it in RAM.
+    if (first_word != 0x80371240u) {
+        recompui::show_error_screen(
+            "Unsupported ROM Format",
+            "Streamed ROM access requires a big-endian .z64 image on disc.\n\n"
+            "Convert your ROM to .z64 before burning the disc.");
+        return false;
+    }
+
+    uint64_t rom_hash = 0;
+    if (!dreamcast::gdrom_file_xxh3_64(DC_ROM_PATH, rom_size, &rom_hash) ||
+        rom_hash != game.rom_hash) {
+        recompui::show_error_screen(
+            "ROM Hash Mismatch",
+            "The ROM on the disc does not match Majora's Mask (US 1.0).\n\n"
+            "Use the correct ROM image when building the disc.");
+        return false;
+    }
+
+    fprintf(stdout, "[DC] Validated ROM at %s (%zu bytes, streamed PI reads)\n",
+            DC_ROM_PATH, rom_size);
+    recomp::set_rom_stream(std::filesystem::path(DC_ROM_PATH), rom_size);
     recomp::start_game(game.game_id);
     return true;
 }
@@ -252,6 +259,13 @@ bool dc_boot_load_rom() {
 void dc_vi_callback() {
     recomp::update_rumble();
     dreamcast::storage_poll();
+
+    static uint64_t last_ram_log_ms = 0;
+    const uint64_t now = timer_ms_gettime64();
+    if (now - last_ram_log_ms >= 5000) {
+        dreamcast::ram::log_status(" periodic");
+        last_ram_log_ms = now;
+    }
 }
 
 } // anonymous namespace
@@ -288,9 +302,6 @@ int main(int argc, char** argv) {
     for (const auto& game : supported_games) {
         recomp::register_game(game);
     }
-
-    // Auto-start the game on boot for Dreamcast (Launcher is disabled)
-    recomp::start_game(supported_games[0].game_id);
 
     // Note: embedded mods are not loaded on Dreamcast since the mod system
     // is disabled. Only the base game is supported.
@@ -355,8 +366,8 @@ int main(int argc, char** argv) {
         .get_game_thread_name = zelda64::get_game_thread_name,
     };
 
-    // Load the ROM from GD-ROM and mark the game as started; recomp::start()
-    // below then boots straight into gameplay (there is no launcher UI).
+    // Validate the ROM on GD-ROM, register streamed PI reads, and mark the
+    // game as started; recomp::start() below then boots straight into gameplay.
     if (!dc_boot_load_rom()) {
         dreamcast::aica_shutdown();
         dreamcast::platform_shutdown();

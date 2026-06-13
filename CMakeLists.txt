@@ -48,6 +48,32 @@ if (DREAMCAST)
     add_compile_definitions(DREAMCAST)
     add_compile_definitions(FMT_USE_LONG_DOUBLE=0)
     message(STATUS "Building for Sega Dreamcast (SH-4 / KallistiOS)")
+
+    # Apply KOS/GCC compatibility and Dreamcast-specific librecomp patches before
+    # the N64ModernRuntime sub-build picks up the sources.
+    set(DC_PATCH_DIR "${CMAKE_SOURCE_DIR}/.github/dreamcast")
+    foreach(dc_patch IN ITEMS ultramodern-gcc9.patch ultramodern-dreamcast.patch librecomp-gcc9.patch librecomp-dreamcast.patch)
+        if (EXISTS "${DC_PATCH_DIR}/${dc_patch}")
+            execute_process(
+                COMMAND patch -p1 --forward -i "${DC_PATCH_DIR}/${dc_patch}"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime"
+                RESULT_VARIABLE dc_patch_result
+            )
+            if (dc_patch_result GREATER 1)
+                message(FATAL_ERROR "Failed to apply Dreamcast patch: ${dc_patch}")
+            endif()
+        endif()
+    endforeach()
+    if (EXISTS "${DC_PATCH_DIR}/recomp-sh4.patch")
+        execute_process(
+            COMMAND patch -p1 --forward -i "${DC_PATCH_DIR}/recomp-sh4.patch"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/lib/N64ModernRuntime/N64Recomp"
+            RESULT_VARIABLE dc_patch_result
+        )
+        if (dc_patch_result GREATER 1)
+            message(FATAL_ERROR "Failed to apply Dreamcast patch: recomp-sh4.patch")
+        endif()
+    endif()
 endif()
 
 if (NOT DREAMCAST)
@@ -162,6 +188,8 @@ if (DREAMCAST)
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_texture_cache.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp
         ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_support.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_ram.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_fixed_texture.cpp
         ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_input.cpp
         ${CMAKE_SOURCE_DIR}/src/game/dreamcast/dc_config.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/dreamcast/dc_ui.cpp
@@ -244,6 +272,20 @@ if (DREAMCAST)
     target_compile_options(Zelda64Recompiled PRIVATE
         -fno-strict-aliasing
     )
+
+    # SM64 DC: -O3 on renderer/audio hot paths while the global build uses -Os -flto.
+    set_source_files_properties(
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_gbi.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_pvr_renderer.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_texture_cache.cpp
+        ${CMAKE_SOURCE_DIR}/src/main/dreamcast/dc_audio.cpp
+        PROPERTIES COMPILE_OPTIONS "-O3"
+    )
+
+    if (DC_SH4ZAM_FOUND)
+        target_compile_definitions(Zelda64Recompiled PRIVATE DC_HAS_SH4ZAM=1)
+        target_link_libraries(Zelda64Recompiled PRIVATE sh4zam)
+    endif()
 elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     target_compile_options(Zelda64Recompiled PRIVATE
         -march=nehalem

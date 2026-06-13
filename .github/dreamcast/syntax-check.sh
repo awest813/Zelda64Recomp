@@ -26,6 +26,10 @@ patch_file="$repo_root/.github/dreamcast/ultramodern-gcc9.patch"
 if [[ -f "$patch_file" ]]; then
     patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$patch_file" || true
 fi
+ultramodern_dc_patch="$repo_root/.github/dreamcast/ultramodern-dreamcast.patch"
+if [[ -f "$ultramodern_dc_patch" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$ultramodern_dc_patch" || true
+fi
 recomp_patch="$repo_root/.github/dreamcast/recomp-sh4.patch"
 if [[ -f "$recomp_patch" ]]; then
     patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime/N64Recomp" < "$recomp_patch" || true
@@ -33,6 +37,10 @@ fi
 librecomp_patch="$repo_root/.github/dreamcast/librecomp-gcc9.patch"
 if [[ -f "$librecomp_patch" ]]; then
     patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$librecomp_patch" || true
+fi
+librecomp_dc_patch="$repo_root/.github/dreamcast/librecomp-dreamcast.patch"
+if [[ -f "$librecomp_dc_patch" ]]; then
+    patch -p1 --forward -d "$repo_root/lib/N64ModernRuntime" < "$librecomp_dc_patch" || true
 fi
 
 # ── Locate the KOS environment ───────────────────────────────────────
@@ -116,6 +124,15 @@ flags=(
 if [[ -n "${KOS_CFLAGS:-}" ]]; then
   # shellcheck disable=SC2206
   flags+=(${KOS_CFLAGS})
+fi
+
+# When kos-ports sh4zam is installed, also syntax-check the SH-4 fast paths.
+sh4zam_lib="${KOS_BASE}/addons/lib/${KOS_ARCH:-dreamcast}/libsh4zam.a"
+if [[ -f "$sh4zam_lib" ]]; then
+  flags+=(-DDC_HAS_SH4ZAM)
+  includes+=(-isystem "${KOS_BASE}/addons/include")
+  echo "sh4zam detected — including DC_HAS_SH4ZAM paths"
+  echo
 fi
 
 # ── Collect Dreamcast translation units ──────────────────────────────

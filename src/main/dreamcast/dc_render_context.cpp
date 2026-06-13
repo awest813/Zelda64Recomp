@@ -23,6 +23,7 @@
 #include <kos.h>
 #include <dc/pvr.h>
 #include <dc/video.h>
+#include <kos/thread.h>
 
 #ifndef PVR_TXRFMT_X32_STRIDE
 #define PVR_TXRFMT_X32_STRIDE PVR_TXRFMT_STRIDE
@@ -37,6 +38,7 @@
 #include "dc_gbi.h"
 #include "dc_pvr_renderer.h"
 #include "dc_texture_cache.h"
+#include "dc_ram.h"
 
 namespace {
 
@@ -190,7 +192,7 @@ private:
     uint8_t* rdram_;
     bool initialized_ = false;
     bool developer_mode_ = false;
-    uint32_t display_framerate_ = 60;
+    uint32_t display_framerate_ = 30;
 
     // Cached N64 framebuffer texture in PVR VRAM.
     pvr_ptr_t fb_texture_ = 0;
@@ -219,6 +221,8 @@ private:
     dreamcast::pvr::Renderer pvr_renderer_;
     dreamcast::tex::Cache texture_cache_;
     uint32_t frame_index_ = 0;
+    uint64_t last_present_ms_ = 0;
+    static constexpr uint32_t kTargetFrameMs = 33; // 30 fps (SM64 DC pacing)
 };
 
 PVRContext::PVRContext(uint8_t* rdram, ultramodern::renderer::WindowHandle /*window_handle*/, bool developer_mode)
@@ -337,6 +341,20 @@ void PVRContext::update_screen() {
 
     // BIOS-font labels are composited on the framebuffer after the PVR scene.
     recompui::render_menu_overlay();
+
+    // SM64 DC: explicit 30 fps limiter after present for thermal/thread stability.
+    const uint64_t now_ms = timer_ms_gettime64();
+    if (last_present_ms_ != 0) {
+        const uint64_t elapsed = now_ms - last_present_ms_;
+        if (elapsed < kTargetFrameMs) {
+            thd_sleep(static_cast<int>(kTargetFrameMs - elapsed));
+        }
+    }
+    last_present_ms_ = timer_ms_gettime64();
+
+    if ((frame_index_ % 300) == 0) {
+        dreamcast::ram::log_status(" frame");
+    }
 
     frame_index_++;
 }

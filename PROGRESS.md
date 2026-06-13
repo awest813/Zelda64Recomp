@@ -4,7 +4,7 @@
 
 **Target:** Sega Dreamcast (SH-4 @ 200 MHz, 16 MB RAM, 8 MB VRAM) via [KallistiOS](https://github.com/KallistiOS/KallistiOS).
 
-**Last updated:** 2026-06-09
+**Last updated:** 2026-06-12
 
 ---
 
@@ -32,7 +32,12 @@
 | Host-side N64Recomp / RSPRecomp codegen | ✅ | Requires ROM + generated `RecompiledFuncs/` (not in repo) |
 | GD-ROM disc image workflow (`tools/dreamcast/make_disc.sh` + `dc_disc` target) | ✅ | Wraps `mkdcdisc`; stages `rom.z64` at disc root |
 | Dreamcast CI / automated builds | 🟡 | `dreamcast.yml` syntax-checks all DC sources with the KOS SH-4 toolchain on push/PR; full link needs ROM-derived codegen (out of CI scope) |
-| sh4zam optimized matrix math (`-DDC_HAS_SH4ZAM`) | 🟡 | Optional; off by default |
+| sh4zam (MIT) — matrix, fog, audio when kos-ports lib present | ✅ | Auto-linked via `DC_SH4ZAM_FOUND`; `-O3` hot paths |
+| LTO + `-Os` global / `-O3` renderer hot files (SM64 discipline) | ✅ | `dreamcast.cmake` + per-file properties in `CMakeLists.txt` |
+| RAM telemetry (`mallinfo` boot + periodic VI logs) | ✅ | `dc_ram.cpp`; logs every 5 s and every 300 frames |
+| 30 fps frame limiter | ✅ | `PVRContext::update_screen()` after present |
+| Fixed texture overrides (`/cd/fixed_textures/*.dt`) | 🟡 | Runtime hook in `dc_texture_cache`; assets TBD per playtest |
+| GBI opcode diff vs SM64 (`compare_gbi_dispatch.py`) | ✅ | Run when hardware logs unimplemented opcodes |
 
 ### Core runtime
 
@@ -53,7 +58,7 @@
 | Feature | Status | Remains |
 |---------|--------|---------|
 | KOS entry point (`dc_main.cpp`) | ✅ | — |
-| Auto-boot from `/cd/rom.z64` (header check, byteswap, `set_rom_contents` + `start_game`) | ✅ | No launcher; `make_disc.sh` stages the ROM. **Whole ROM is loaded into RAM** — see Performance |
+| Auto-boot from `/cd/rom.z64` (header check, byteswap, streamed PI reads + `start_game`) | ✅ | No launcher; `make_disc.sh` stages the ROM. ROM is validated on boot (header + XXH3 hash) then read on demand from GD-ROM via `set_rom_stream` |
 | File picker / ROM selection UI | ➖ | Auto-loads fixed path; no dialog |
 | Error display to player | ✅ | Full-screen BIOS-font error screens (`show_error_screen`); missing/wrong ROM, OOM, VMU failures all render on screen |
 | Version string (`1.2.2-dc`) | ✅ | — |
@@ -148,7 +153,7 @@
 
 | Feature | Status | Remains |
 |---------|--------|---------|
-| 16 MB RAM footprint | ❓ | No profiling data; likely needs optimization |
+| 16 MB RAM footprint | 🟡 | `mallinfo` telemetry at boot + periodic; tune after hardware profiling |
 | 200 MHz SH-4 frame rate | ❓ | Target unknown; may require LOD / culling / GBI tuning |
 | VRAM texture cache pressure | ❓ | 3 MB budget; eviction behavior under heavy scenes untested |
 | Real-hardware test pass | ❌ | No test matrix or hardware CI |
@@ -182,8 +187,8 @@ Ordered by dependency. Items marked **blocker** must be resolved before the port
 | 2 | **In-game rendering correctness** | Blocker | Fix GBI gaps found during play (unimplemented opcodes now logged once on stderr) |
 | 3 | **Performance / RAM** | Blocker | Profile on SH-4; optimize hot paths, texture budget, frame pacing |
 | 4 | **Playthrough validation** | Blocker | Title → Clock Town → dungeons → major scenes without crash/hang |
-| 4a | **Streamed ROM access (PI)** | Blocker | The 32 MB ROM is loaded whole into 16 MB RAM (`set_rom_contents`); needs GD-ROM streaming in librecomp (upstream fork) to be viable on hardware. Boot fails gracefully with an on-screen OOM error today |
-| 4b | **librecomp portability on KOS** | Blocker | `recomp::start()` allocates rdram via anonymous `mmap`; KOS support unverified. Full DC link of librecomp has never been exercised (CI is syntax-only) |
+| 4a | **Streamed ROM access (PI)** | High | Implemented: boot validates `rom.z64` on GD-ROM (header + hash) and registers streamed PI reads (`set_rom_stream`); no full-ROM RAM buffer. Hardware-verify DMA read performance |
+| 4b | **librecomp portability on KOS** | High | RDRAM uses 14 MB `calloc`; mods/mprotect/dlopen stubbed for SH-4; thread naming stubbed. Full DC link still needs ROM-derived codegen; CI remains syntax-only |
 | 5 | **VMU save/load in real play** | High | Verify autosave + manual save across power cycle |
 | 6 | **Audio sync & dropouts** | High | Stress AICA buffer under load |
 | 7 | **On-screen error reporting** | Medium | Done — `show_error_screen()` (blocking, BIOS font) + notification toasts; VMU-write failures raise a toast |

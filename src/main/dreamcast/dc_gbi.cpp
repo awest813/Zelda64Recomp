@@ -20,6 +20,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(DC_HAS_SH4ZAM)
+#include <sh4zam/shz_scalar.h>
+#endif
+
 #include "ultramodern/ultra64.h"
 
 namespace {
@@ -856,8 +860,13 @@ struct GbiState {
         if (screen_z >= static_cast<float>(fog_max)) {
             return 0;
         }
+#if defined(DC_HAS_SH4ZAM)
+        const float range = static_cast<float>(fog_max - fog_min);
+        const float t = (screen_z - static_cast<float>(fog_min)) * shz_divf(1.0f, range);
+#else
         const float t = (screen_z - static_cast<float>(fog_min))
             / (static_cast<float>(fog_max) - static_cast<float>(fog_min));
+#endif
         return static_cast<uint8_t>((1.0f - t) * 255.0f);
     }
 
@@ -875,12 +884,21 @@ struct GbiState {
 
         const float visibility = fog_alpha / 255.0f;
         const float fog_weight = 1.0f - visibility;
+#if defined(DC_HAS_SH4ZAM)
+        return pack_argb(
+            static_cast<uint8_t>(std::min(255.0f, shz_fmaf(r, visibility, fr * fog_weight))),
+            static_cast<uint8_t>(std::min(255.0f, shz_fmaf(g, visibility, fg * fog_weight))),
+            static_cast<uint8_t>(std::min(255.0f, shz_fmaf(b, visibility, fb * fog_weight))),
+            a
+        );
+#else
         return pack_argb(
             static_cast<uint8_t>(std::min(255.0f, r * visibility + fr * fog_weight)),
             static_cast<uint8_t>(std::min(255.0f, g * visibility + fg * fog_weight)),
             static_cast<uint8_t>(std::min(255.0f, b * visibility + fb * fog_weight)),
             a
         );
+#endif
     }
 
     void fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry,

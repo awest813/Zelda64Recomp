@@ -64,6 +64,9 @@ set(CMAKE_SIZE         "${CROSS_PREFIX}size${EXE_EXT}"    CACHE FILEPATH "" FORC
 # -ffunction-sections / -fdata-sections: enable --gc-sections at link time
 set(DC_CPU_FLAGS "-ml -m4-single-only -ffunction-sections -fdata-sections")
 
+# SM64 DC build discipline: size-optimize globally, LTO at link.
+set(DC_OPT_FLAGS "-Os -flto=auto" CACHE STRING "Dreamcast release optimization flags")
+
 # ── KOS include/library paths ───────────────────────────────────────
 # std::span polyfill for KOS GCC 9 (libstdc++ predates <span>).
 get_filename_component(DC_STD_POLYFILL_DIR
@@ -91,14 +94,14 @@ foreach(dir ${KOS_INC_DIRS})
     string(APPEND KOS_INC_FLAGS " -isystem ${dir}")
 endforeach()
 
-set(CMAKE_C_FLAGS_INIT   "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
+set(CMAKE_C_FLAGS_INIT   "${DC_CPU_FLAGS} ${DC_OPT_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
 # Older KOS GCC (9/10) names C++20 -std=gnu++2a; newer toolchains accept
 # -std=gnu++20. Use gnu++2a here so cross-builds work on both.
 get_filename_component(DC_CXXLIB_SHIM
     "${CMAKE_CURRENT_LIST_DIR}/../../lib/std_polyfill/cxxlib_shim.h"
     ABSOLUTE)
-set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS} -std=gnu++2a -include ${DC_CXXLIB_SHIM}")
-set(CMAKE_ASM_FLAGS_INIT "${DC_CPU_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
+set(CMAKE_CXX_FLAGS_INIT "${DC_CPU_FLAGS} ${DC_OPT_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS} -std=gnu++2a -include ${DC_CXXLIB_SHIM}")
+set(CMAKE_ASM_FLAGS_INIT "${DC_CPU_FLAGS} ${DC_OPT_FLAGS} ${KOS_DEFINES} ${KOS_INC_FLAGS}")
 
 # ── Linker flags ─────────────────────────────────────────────────────
 set(KOS_LIB_FLAGS "")
@@ -109,8 +112,25 @@ endforeach()
 set(KOS_LD_SCRIPT "${KOS_BASE}/utils/ldscripts/shlelf.xc")
 
 set(CMAKE_EXE_LINKER_FLAGS_INIT
-    "-ml -m4-single-only -Wl,-Ttext=0x8c010000 -Wl,--gc-sections ${KOS_LIB_FLAGS} -T${KOS_LD_SCRIPT} -lkallisti -lc -lgcc"
+    "-ml -m4-single-only -Wl,-Ttext=0x8c010000 -Wl,--gc-sections -flto ${KOS_LIB_FLAGS} -T${KOS_LD_SCRIPT} -lkallisti -lc -lgcc"
 )
+
+# ── sh4zam (MIT) from kos-ports ─────────────────────────────────────
+option(DC_ENABLE_SH4ZAM "Link sh4zam when installed in the KOS tree" ON)
+set(DC_SH4ZAM_FOUND FALSE CACHE BOOL "sh4zam library detected")
+if(DC_ENABLE_SH4ZAM)
+    foreach(lib_dir ${KOS_LIB_DIRS})
+        if(EXISTS "${lib_dir}/libsh4zam.a")
+            set(DC_SH4ZAM_FOUND TRUE CACHE BOOL "sh4zam library detected" FORCE)
+            break()
+        endif()
+    endforeach()
+    if(DC_SH4ZAM_FOUND)
+        message(STATUS "[DC] sh4zam found — enabling DC_HAS_SH4ZAM")
+    else()
+        message(STATUS "[DC] sh4zam not found — matrix/audio/fog use portable fallbacks")
+    endif()
+endif()
 
 # ── Search paths ─────────────────────────────────────────────────────
 set(CMAKE_FIND_ROOT_PATH "${KOS_BASE}" "${KOS_CC_BASE}/sh-elf")
