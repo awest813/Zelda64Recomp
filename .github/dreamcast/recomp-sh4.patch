@@ -2,7 +2,27 @@ diff --git a/include/recomp.h b/include/recomp.h
 index 73f3e73..5a55f2c 100644
 --- a/include/recomp.h
 +++ b/include/recomp.h
-@@ -66,6 +66,36 @@ static inline void DMULTU(uint64_t a, uint64_t b, uint64_t* lo64, uint64_t* hi64
+@@ -5,4 +5,19 @@
+ #include <stdint.h>
+ #include <math.h>
+ #include <fenv.h>
++#ifdef DREAMCAST
++// SH-4 newlib fenv.h doesn't define these macros, so we define fallback values here.
++#ifndef FE_TONEAREST
++#define FE_TONEAREST 0
++#endif
++#ifndef FE_TOWARDZERO
++#define FE_TOWARDZERO 1
++#endif
++#ifndef FE_UPWARD
++#define FE_UPWARD 2
++#endif
++#ifndef FE_DOWNWARD
++#define FE_DOWNWARD 3
++#endif
++#endif
+ #include <assert.h>
+@@ -66,6 +81,36 @@ static inline void DMULTU(uint64_t a, uint64_t b, uint64_t* lo64, uint64_t* hi64
      *lo64 = _umul128(a, b, hi64);
  }
  
@@ -22,9 +42,9 @@ index 73f3e73..5a55f2c 100644
 +}
 +
 +static inline void DMULT(int64_t a, int64_t b, int64_t* lo64, int64_t* hi64) {
-+    const bool neg = (a < 0) ^ (b < 0);
-+    uint64_t ua = static_cast<uint64_t>(a < 0 ? -a : a);
-+    uint64_t ub = static_cast<uint64_t>(b < 0 ? -b : b);
++    const int neg = (a < 0) ^ (b < 0);
++    uint64_t ua = (uint64_t)(a < 0 ? -a : a);
++    uint64_t ub = (uint64_t)(b < 0 ? -b : b);
 +    uint64_t ulo = 0;
 +    uint64_t uhi = 0;
 +    DMULTU(ua, ub, &ulo, &uhi);
@@ -32,8 +52,8 @@ index 73f3e73..5a55f2c 100644
 +        ulo = ~ulo + 1;
 +        uhi = ~uhi + (ulo == 0);
 +    }
-+    *lo64 = static_cast<int64_t>(ulo);
-+    *hi64 = static_cast<int64_t>(uhi);
++    *lo64 = (int64_t)(ulo);
++    *hi64 = (int64_t)(uhi);
 +}
 +
  #else

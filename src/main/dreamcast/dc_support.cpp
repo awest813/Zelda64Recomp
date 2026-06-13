@@ -592,6 +592,10 @@ unsigned int sleep(unsigned int seconds) {
     return 0;
 }
 
+int usleep(useconds_t usec) {
+    thd_sleep(usec / 1000);
+    return 0;
+}
 int mkdir(const char *pathname, mode_t mode) {
     (void)mode;
     return fs_mkdir(pathname);
@@ -601,6 +605,10 @@ int fchmod(int fd, mode_t mode) {
     (void)fd;
     (void)mode;
     return 0;
+}
+
+int lstat(const char *path, struct stat *buf) {
+    return stat(path, buf);
 }
 
 int _stat_r(struct _reent *reent, const char *path, struct stat *buf) {

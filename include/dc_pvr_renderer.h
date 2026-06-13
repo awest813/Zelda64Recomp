@@ -44,9 +44,9 @@ public:
         bool zbuffer_enabled);
 
     void submit_textured_triangle(
-        float x0, float y0, float z0, float u0, float v0, uint32_t argb0,
-        float x1, float y1, float z1, float u1, float v1, uint32_t argb1,
-        float x2, float y2, float z2, float u2, float v2, uint32_t argb2,
+        float x0, float y0, float z0, float u0, float tv0, uint32_t argb0,
+        float x1, float y1, float z1, float u1, float tv1, uint32_t argb1,
+        float x2, float y2, float z2, float u2, float tv2, uint32_t argb2,
         const tex::Surface& texture,
         const rdp::BlendState& blend,
         bool zbuffer_enabled);
@@ -129,6 +129,10 @@ private:
     void begin_dr();
     void end_dr();
     void submit_vertex_dr(const pvr_vertex_t& vert);
+    void submit_triangle_verts_dr(
+        const pvr_vertex_t& v0,
+        const pvr_vertex_t& v1,
+        const pvr_vertex_t& v2);
     void apply_blend_to_key(BatchKey& key, const rdp::BlendState& blend, bool zbuffer_enabled);
     void apply_wrap_modes(pvr_poly_cxt_t& cxt, uint8_t cms, uint8_t cmt) const;
 

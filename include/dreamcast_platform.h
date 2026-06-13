@@ -126,7 +126,9 @@ namespace recompui {
     void render_menu_pvr_background();
     // BIOS-font text drawn to the framebuffer after the PVR frame is presented.
     void render_menu_overlay();
-    void handle_menu_input(uint32_t buttons_pressed);
+    void handle_menu_input(uint32_t buttons_pressed, float trigger_l, float trigger_r);
+    // Opens the main menu overlay (used for boot launcher and pause menu).
+    void open_main_menu(bool is_boot);
     // Opens the in-game config menu (volume, autosave, targeting, etc.). The
     // input backend triggers this from a controller combo during gameplay.
     // Values are written through the zelda64 config setters and persisted to

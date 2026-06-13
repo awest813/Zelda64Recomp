@@ -386,6 +386,40 @@ struct GbiState {
     std::array<TransformedVertex, MAX_VERTICES> xf_buffer{};
     std::array<uint8_t, MAX_VERTICES> vtx_loaded{};
 
+    // ── Per-frame caches (avoid redundant recomputation per triangle) ──
+    // Cached effective scissor rect — invalidated when scissor stack or align changes.
+    mutable ScissorRect cached_scissor{};
+    mutable bool scissor_dirty = true;
+
+    // Cached blend state — invalidated when other_mode_l/h or blend_color changes.
+    mutable rdp::BlendState cached_blend{};
+    mutable bool blend_dirty = true;
+
+    // Cached combine-uses flags — invalidated when combine_mode changes.
+    mutable bool cached_uses_texel0 = false;
+    mutable bool cached_uses_texel1 = false;
+    mutable bool combine_flags_dirty = true;
+
+    // Cached resolved texture — invalidated when loaded_textures, render_tile, palette, or cache generation changes.
+    mutable const uint8_t* cached_tex_addr = nullptr;
+    mutable size_t cached_tex_size = 0;
+    mutable uint8_t cached_tex_fmt = 0;
+    mutable uint8_t cached_tex_siz = 0;
+    mutable uint8_t cached_tex_cms = 0;
+    mutable uint8_t cached_tex_cmt = 0;
+    mutable uint16_t cached_tex_uls = 0;
+    mutable uint16_t cached_tex_ult = 0;
+    mutable uint16_t cached_tex_lrs = 0;
+    mutable uint16_t cached_tex_lrt = 0;
+    mutable uint16_t cached_tex_line_size = 0;
+    mutable const uint8_t* cached_tex_palette = nullptr;
+    mutable uint32_t cached_tex_generation = 0;
+    mutable tex::Surface cached_tex_surface{};
+
+    // Cached effective viewport — invalidated when viewport stack or align changes.
+    mutable Viewport cached_viewport{};
+    mutable bool viewport_dirty = true;
+
     struct ColorImage {
         uint32_t address = 0;
         uint16_t width = 320;
@@ -407,6 +441,11 @@ struct GbiState {
     uint32_t fog_color = 0;
     uint32_t fog_factor = 0;
     uint64_t combine_mode = 0;
+
+    void invalidate_blend() { blend_dirty = true; }
+    void invalidate_scissor() { scissor_dirty = true; }
+    void invalidate_combine_flags() { combine_flags_dirty = true; }
+    void invalidate_viewport() { viewport_dirty = true; }
 
     tmem::Buffer tmem{};
     uint32_t tmem_offset = 0;
@@ -453,7 +492,11 @@ struct GbiState {
     }
 
     rdp::BlendState current_blend_state() const {
-        return rdp::decode_blend(other_mode_l, other_mode_h, zbuffer_enabled(), blend_color);
+        if (blend_dirty) {
+            cached_blend = rdp::decode_blend(other_mode_l, other_mode_h, zbuffer_enabled(), blend_color);
+            blend_dirty = false;
+        }
+        return cached_blend;
     }
 
     static float compute_pvr_depth(float ndc_z) {
@@ -486,16 +529,24 @@ struct GbiState {
         return static_cast<int32_t>(origin_offset_x(origin, offset) * 4.0f) + value;
     }
 
-    Viewport effective_viewport() const {
+    const Viewport& effective_viewport() const {
+        if (!viewport_dirty) {
+            return cached_viewport;
+        }
         Viewport vp = viewport;
         if ((viewport_align.origin & 0xF00) != G_EX_ORIGIN_NONE) {
             vp.translate[0] += origin_offset_x(viewport_align.origin, viewport_align.x_offset);
             vp.translate[1] += origin_offset_y(viewport_align.origin, viewport_align.y_offset);
         }
-        return vp;
+        cached_viewport = vp;
+        viewport_dirty = false;
+        return cached_viewport;
     }
 
-    ScissorRect effective_scissor() const {
+    const ScissorRect& effective_scissor() const {
+        if (!scissor_dirty) {
+            return cached_scissor;
+        }
         ScissorRect sc = scissor_stack[scissor_stack_size - 1];
         if ((scissor_align.left_origin & 0xF00) != G_EX_ORIGIN_NONE
             || (scissor_align.right_origin & 0xF00) != G_EX_ORIGIN_NONE) {
@@ -508,11 +559,13 @@ struct GbiState {
             sc.lry = scissor_align.lry_bound + scissor_align.lry_offset;
             sc.enabled = true;
         }
-        return sc;
+        cached_scissor = sc;
+        scissor_dirty = false;
+        return cached_scissor;
     }
 
     bool passes_scissor(float screen_x, float screen_y) const {
-        const ScissorRect sc = effective_scissor();
+        const ScissorRect& sc = effective_scissor();
         return sc.contains_pixel(static_cast<int>(screen_x), static_cast<int>(screen_y));
     }
 
@@ -555,9 +608,10 @@ struct GbiState {
     // vertex normal gives the diffuse intensity.
     void compute_light_coeffs() {
         for (int i = 0; i < num_dir_lights; i++) {
-            const float lx = static_cast<float>(raw_lights[i].dir[0]) / 127.0f;
-            const float ly = static_cast<float>(raw_lights[i].dir[1]) / 127.0f;
-            const float lz = static_cast<float>(raw_lights[i].dir[2]) / 127.0f;
+            const float inv_127 = 1.0f / 127.0f;
+            const float lx = static_cast<float>(raw_lights[i].dir[0]) * inv_127;
+            const float ly = static_cast<float>(raw_lights[i].dir[1]) * inv_127;
+            const float lz = static_cast<float>(raw_lights[i].dir[2]) * inv_127;
             float cx = lx * model_matrix[0][0] + ly * model_matrix[0][1] + lz * model_matrix[0][2];
             float cy = lx * model_matrix[1][0] + ly * model_matrix[1][1] + lz * model_matrix[1][2];
             float cz = lx * model_matrix[2][0] + ly * model_matrix[2][1] + lz * model_matrix[2][2];
@@ -588,7 +642,7 @@ struct GbiState {
         float b = static_cast<float>(ambient.col[2]);
 
         for (int i = 0; i < num_dir_lights; i++) {
-            float intensity = (nx * light_coeffs[i][0] + ny * light_coeffs[i][1] + nz * light_coeffs[i][2]) / 127.0f;
+            float intensity = (nx * light_coeffs[i][0] + ny * light_coeffs[i][1] + nz * light_coeffs[i][2]) * (1.0f / 127.0f);
             if (intensity > 0.0f) {
                 r += intensity * static_cast<float>(raw_lights[i].col[0]);
                 g += intensity * static_cast<float>(raw_lights[i].col[1]);
@@ -620,7 +674,7 @@ struct GbiState {
 
         TransformedVertex& out = xf_buffer[index];
         out.w = tw;
-        const Viewport vp = effective_viewport();
+        const Viewport& vp = effective_viewport();
         const float inv_w = 1.0f / tw;
         out.screen_x = (tx * inv_w) * vp.scale[0] + vp.translate[0];
         out.screen_y = (ty * -inv_w) * vp.scale[1] + vp.translate[1];
@@ -667,11 +721,21 @@ struct GbiState {
     }
 
     bool combine_uses_texel0() const {
-        return combiner::uses_texel0(combine_mode);
+        if (combine_flags_dirty) {
+            cached_uses_texel0 = combiner::uses_texel0(combine_mode);
+            cached_uses_texel1 = combiner::uses_texel1(combine_mode);
+            combine_flags_dirty = false;
+        }
+        return cached_uses_texel0;
     }
 
     bool combine_uses_texel1() const {
-        return combiner::uses_texel1(combine_mode);
+        if (combine_flags_dirty) {
+            cached_uses_texel0 = combiner::uses_texel0(combine_mode);
+            cached_uses_texel1 = combiner::uses_texel1(combine_mode);
+            combine_flags_dirty = false;
+        }
+        return cached_uses_texel1;
     }
 
     combiner::ColorSource to_combiner_color(const tex::TexelColor& texel) const {
@@ -808,9 +872,39 @@ struct GbiState {
         if (texture_cache == nullptr || !loaded_textures[0].valid) {
             return {};
         }
+
+        const uint8_t* addr = loaded_textures[0].addr;
+        const size_t size_bytes = loaded_textures[0].size_bytes;
+        const uint32_t current_generation = texture_cache->generation();
+
+        if (addr == cached_tex_addr && size_bytes == cached_tex_size
+            && render_tile.fmt == cached_tex_fmt && render_tile.siz == cached_tex_siz
+            && render_tile.cms == cached_tex_cms && render_tile.cmt == cached_tex_cmt
+            && render_tile.uls == cached_tex_uls && render_tile.ult == cached_tex_ult
+            && render_tile.lrs == cached_tex_lrs && render_tile.lrt == cached_tex_lrt
+            && render_tile.line_size_bytes == cached_tex_line_size
+            && palette == cached_tex_palette && current_generation == cached_tex_generation
+            && cached_tex_surface.valid) {
+            return cached_tex_surface;
+        }
+
+        cached_tex_addr = addr;
+        cached_tex_size = size_bytes;
+        cached_tex_fmt = render_tile.fmt;
+        cached_tex_siz = render_tile.siz;
+        cached_tex_cms = render_tile.cms;
+        cached_tex_cmt = render_tile.cmt;
+        cached_tex_uls = render_tile.uls;
+        cached_tex_ult = render_tile.ult;
+        cached_tex_lrs = render_tile.lrs;
+        cached_tex_lrt = render_tile.lrt;
+        cached_tex_line_size = render_tile.line_size_bytes;
+        cached_tex_palette = palette;
+        cached_tex_generation = current_generation;
+
         tex::LoadedTexture tex{};
-        tex.addr = loaded_textures[0].addr;
-        tex.size_bytes = loaded_textures[0].size_bytes;
+        tex.addr = addr;
+        tex.size_bytes = size_bytes;
 
         tex::TileState tile{};
         tile.fmt = render_tile.fmt;
@@ -823,7 +917,8 @@ struct GbiState {
         tile.lrt = render_tile.lrt;
         tile.line_size_bytes = render_tile.line_size_bytes;
 
-        return texture_cache->upload(tex, tile, palette);
+        cached_tex_surface = texture_cache->upload(tex, tile, palette);
+        return cached_tex_surface;
     }
 
     void normalize_uv(float raw_u, float raw_v, float& u, float& v) const {
@@ -876,29 +971,30 @@ struct GbiState {
             return color;
         }
 
-        uint8_t r, g, b, a;
-        unpack_argb(color, r, g, b, a);
-        uint8_t fr, fg, fb, fa;
-        unpack_color(fog_color, fr, fg, fb, fa);
-        (void)fa;
+        const uint8_t r = static_cast<uint8_t>((color >> 16) & 0xFF);
+        const uint8_t g = static_cast<uint8_t>((color >> 8) & 0xFF);
+        const uint8_t b = static_cast<uint8_t>(color & 0xFF);
+        const uint8_t a = static_cast<uint8_t>((color >> 24) & 0xFF);
 
-        const float visibility = fog_alpha / 255.0f;
-        const float fog_weight = 1.0f - visibility;
-#if defined(DC_HAS_SH4ZAM)
-        return pack_argb(
-            static_cast<uint8_t>(std::min(255.0f, shz_fmaf(r, visibility, fr * fog_weight))),
-            static_cast<uint8_t>(std::min(255.0f, shz_fmaf(g, visibility, fg * fog_weight))),
-            static_cast<uint8_t>(std::min(255.0f, shz_fmaf(b, visibility, fb * fog_weight))),
-            a
-        );
-#else
-        return pack_argb(
-            static_cast<uint8_t>(std::min(255.0f, r * visibility + fr * fog_weight)),
-            static_cast<uint8_t>(std::min(255.0f, g * visibility + fg * fog_weight)),
-            static_cast<uint8_t>(std::min(255.0f, b * visibility + fb * fog_weight)),
-            a
-        );
-#endif
+        const uint8_t fr = static_cast<uint8_t>((fog_color >> 24) & 0xFF);
+        const uint8_t fg = static_cast<uint8_t>((fog_color >> 16) & 0xFF);
+        const uint8_t fb = static_cast<uint8_t>((fog_color >> 8) & 0xFF);
+
+        const int f = fog_alpha;
+        const int inv_f = 255 - f;
+
+        const int vr = r * f + fr * inv_f;
+        const int vg = g * f + fg * inv_f;
+        const int vb = b * f + fb * inv_f;
+
+        const uint8_t nr = static_cast<uint8_t>((vr + 1 + (vr >> 8)) >> 8);
+        const uint8_t ng = static_cast<uint8_t>((vg + 1 + (vg >> 8)) >> 8);
+        const uint8_t nb = static_cast<uint8_t>((vb + 1 + (vb >> 8)) >> 8);
+
+        return (static_cast<uint32_t>(a) << 24)
+             | (static_cast<uint32_t>(nr) << 16)
+             | (static_cast<uint32_t>(ng) << 8)
+             | static_cast<uint32_t>(nb);
     }
 
     void fill_rect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry,
@@ -967,11 +1063,19 @@ struct GbiState {
             return;
         }
 
-        const ScissorRect scissor = effective_scissor();
+        const ScissorRect& scissor = effective_scissor();
         if (scissor.enabled) {
-            const bool any_inside = passes_scissor(v0.screen_x, v0.screen_y)
-                || passes_scissor(v1.screen_x, v1.screen_y)
-                || passes_scissor(v2.screen_x, v2.screen_y);
+            // Inline contains_pixel for all 3 verts to avoid 3 struct copies.
+            const int x0i = static_cast<int>(v0.screen_x);
+            const int y0i = static_cast<int>(v0.screen_y);
+            const int x1i = static_cast<int>(v1.screen_x);
+            const int y1i = static_cast<int>(v1.screen_y);
+            const int x2i = static_cast<int>(v2.screen_x);
+            const int y2i = static_cast<int>(v2.screen_y);
+            const bool any_inside =
+                (x0i * 4 >= scissor.ulx && x0i * 4 < scissor.lrx && y0i * 4 >= scissor.uly && y0i * 4 < scissor.lry)
+             || (x1i * 4 >= scissor.ulx && x1i * 4 < scissor.lrx && y1i * 4 >= scissor.uly && y1i * 4 < scissor.lry)
+             || (x2i * 4 >= scissor.ulx && x2i * 4 < scissor.lrx && y2i * 4 >= scissor.uly && y2i * 4 < scissor.lry);
             if (!any_inside) {
                 return;
             }
@@ -1007,16 +1111,26 @@ struct GbiState {
         const bool combiner_needs_texel1 = use_texture && combine_mode != 0 && combine_uses_texel1();
         const bool combiner_needs_texel = combiner_needs_texel0 || combiner_needs_texel1;
 
-        const combiner::ColorSource tex0_0 = combiner_needs_texel0 ? sample_texel0(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
-        const combiner::ColorSource tex1_0 = combiner_needs_texel1 ? sample_texel1(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
-        const combiner::ColorSource tex0_1 = combiner_needs_texel0 ? sample_texel0(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
-        const combiner::ColorSource tex1_1 = combiner_needs_texel1 ? sample_texel1(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
-        const combiner::ColorSource tex0_2 = combiner_needs_texel0 ? sample_texel0(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
-        const combiner::ColorSource tex1_2 = combiner_needs_texel1 ? sample_texel1(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+        uint32_t c0, c1, c2;
 
-        uint32_t c0 = vertex_combine_factor(r0, g0, b0, a0, tex0_0, tex1_0);
-        uint32_t c1 = vertex_combine_factor(r1, g1, b1, a1, tex0_1, tex1_1);
-        uint32_t c2 = vertex_combine_factor(r2, g2, b2, a2, tex0_2, tex1_2);
+        // Fast path: combine_mode == 0 means pass shade color directly (RGBA=shade).
+        // This is the most common case for untextured / fully-lit geometry.
+        if (combine_mode == 0) {
+            c0 = pack_argb(r0, g0, b0, a0);
+            c1 = pack_argb(r1, g1, b1, a1);
+            c2 = pack_argb(r2, g2, b2, a2);
+        } else {
+            const combiner::ColorSource tex0_0 = combiner_needs_texel0 ? sample_texel0(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+            const combiner::ColorSource tex1_0 = combiner_needs_texel1 ? sample_texel1(v0.tex_u, v0.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+            const combiner::ColorSource tex0_1 = combiner_needs_texel0 ? sample_texel0(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+            const combiner::ColorSource tex1_1 = combiner_needs_texel1 ? sample_texel1(v1.tex_u, v1.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+            const combiner::ColorSource tex0_2 = combiner_needs_texel0 ? sample_texel0(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+            const combiner::ColorSource tex1_2 = combiner_needs_texel1 ? sample_texel1(v2.tex_u, v2.tex_v) : combiner::ColorSource{255, 255, 255, 255};
+            c0 = vertex_combine_factor(r0, g0, b0, a0, tex0_0, tex1_0);
+            c1 = vertex_combine_factor(r1, g1, b1, a1, tex0_1, tex1_1);
+            c2 = vertex_combine_factor(r2, g2, b2, a2, tex0_2, tex1_2);
+        }
+
         if (geometry_mode & G_FOG) {
             c0 = apply_fog_blend(c0, v0.fog_alpha);
             c1 = apply_fog_blend(c1, v1.fog_alpha);
@@ -1109,6 +1223,7 @@ struct GbiState {
         if (viewport_stack_size > 0) {
             viewport_stack[viewport_stack_size - 1] = viewport;
         }
+        invalidate_viewport();
     }
 
     void matrix_op(uint32_t address, uint8_t params) {
@@ -1174,6 +1289,7 @@ struct GbiState {
         sc.lrx = lrx;
         sc.lry = lry;
         sc.enabled = (mode != 0);
+        invalidate_scissor();
     }
 
     // ── Display list dispatch ───────────────────────────────────────
@@ -1283,8 +1399,13 @@ struct GbiState {
     static void dl_geometrymode(GbiState& s, DisplayList*& dl) {
         const uint32_t off_mask = dl->p0(0, 24);
         const uint32_t on_mask = dl->w1;
+        const uint32_t old_mode = s.geometry_mode;
         s.geometry_mode &= off_mask;
         s.geometry_mode |= on_mask;
+        // G_ZBUFFER bit affects zbuffer_enabled() which is part of blend state.
+        if ((s.geometry_mode ^ old_mode) & G_ZBUFFER) {
+            s.invalidate_blend();
+        }
     }
 
     static void dl_texture(GbiState& s, DisplayList*& dl) {
@@ -1373,6 +1494,7 @@ struct GbiState {
             std::max<int32_t>(0, static_cast<int32_t>(32 - dl->p0(8, 8) - size)));
         const uint32_t mask = ((1u << size) - 1u) << off;
         s.other_mode_h = (s.other_mode_h & ~mask) | ((dl->w1 << off) & mask);
+        s.invalidate_blend();
     }
 
     static void dl_setothermode_l(GbiState& s, DisplayList*& dl) {
@@ -1381,11 +1503,13 @@ struct GbiState {
             std::max<int32_t>(0, static_cast<int32_t>(32 - dl->p0(8, 8) - size)));
         const uint32_t mask = ((1u << size) - 1u) << off;
         s.other_mode_l = (s.other_mode_l & ~mask) | ((dl->w1 << off) & mask);
+        s.invalidate_blend();
     }
 
     static void dl_rdp_setothermode(GbiState& s, DisplayList*& dl) {
         s.other_mode_h = dl->p0(0, 24);
         s.other_mode_l = dl->w1;
+        s.invalidate_blend();
     }
 
     static void dl_setcimg(GbiState& s, DisplayList*& dl) {
@@ -1416,6 +1540,7 @@ struct GbiState {
 
     static void dl_setblendcolor(GbiState& s, DisplayList*& dl) {
         s.blend_color = dl->w1;
+        s.invalidate_blend();
     }
 
     static void dl_setfogcolor(GbiState& s, DisplayList*& dl) {
@@ -1577,6 +1702,7 @@ struct GbiState {
 
     static void dl_setcombine(GbiState& s, DisplayList*& dl) {
         s.combine_mode = (static_cast<uint64_t>(dl->w1) << 32) | dl->w0;
+        s.invalidate_combine_flags();
     }
 
     static void dl_settimg(GbiState& s, DisplayList*& dl) {
@@ -1824,6 +1950,7 @@ struct GbiState {
             s.viewport_align.origin = static_cast<int16_t>(dl->p0(0, 12));
             s.viewport_align.x_offset = static_cast<int16_t>(dl->p1(16, 16));
             s.viewport_align.y_offset = static_cast<int16_t>(dl->p1(0, 16));
+            s.invalidate_viewport();
             break;
         case G_EX_SETSCISSORALIGN_V1:
             s.scissor_align.left_origin = static_cast<int16_t>(dl->p1(0, 12));
@@ -1838,6 +1965,7 @@ struct GbiState {
             s.scissor_align.uly_bound = static_cast<int16_t>(dl->p0(0, 16));
             s.scissor_align.lrx_bound = static_cast<int16_t>(dl->p1(16, 16));
             s.scissor_align.lry_bound = static_cast<int16_t>(dl->p1(0, 16));
+            s.invalidate_scissor();
             break;
         case G_EX_VERTEXZTEST_V1: {
             const uint8_t vtx_index = static_cast<uint8_t>(dl->p1(0, 8));
@@ -1885,6 +2013,7 @@ struct GbiState {
         case G_EX_POPVIEWPORT_V1:
             if (s.viewport_stack_size > 1) {
                 s.viewport = s.viewport_stack[--s.viewport_stack_size];
+                s.invalidate_viewport();
             }
             break;
         case G_EX_PUSHOTHERMODE_V1:
@@ -1894,12 +2023,14 @@ struct GbiState {
         case G_EX_POPOTHERMODE_V1:
             pop_state(s.other_mode_l_stack.data(), s.other_mode_l_stack_size, s.other_mode_l);
             pop_state(s.other_mode_h_stack.data(), s.other_mode_h_stack_size, s.other_mode_h);
+            s.invalidate_blend();
             break;
         case G_EX_PUSHCOMBINE_V1:
             push_u64(s.combine_stack.data(), s.combine_stack_size, s.combine_mode);
             break;
         case G_EX_POPCOMBINE_V1:
             pop_u64(s.combine_stack.data(), s.combine_stack_size, s.combine_mode);
+            s.invalidate_combine_flags();
             break;
         case G_EX_PUSHPROJMATRIX_V1:
             if (s.proj_stack_size < MATRIX_STACK_SIZE) {
@@ -1917,6 +2048,7 @@ struct GbiState {
             break;
         case G_EX_POPGEOMETRYMODE_V1:
             pop_state(s.geometry_mode_stack.data(), s.geometry_mode_stack_size, s.geometry_mode);
+            s.invalidate_blend(); // G_ZBUFFER bit may have changed
             break;
         case G_EX_PUSHPRIMCOLOR_V1:
             push_state(s.prim_color_stack.data(), s.prim_color_stack_size, s.prim_color);
@@ -1934,11 +2066,13 @@ struct GbiState {
             if (s.scissor_stack_size < 15) {
                 s.scissor_stack[s.scissor_stack_size] = s.scissor_stack[s.scissor_stack_size - 1];
                 s.scissor_stack_size++;
+                s.invalidate_scissor();
             }
             break;
         case G_EX_POPSCISSOR_V1:
             if (s.scissor_stack_size > 1) {
                 s.scissor_stack_size--;
+                s.invalidate_scissor();
             }
             break;
         case G_EX_VERTEX_V1: {

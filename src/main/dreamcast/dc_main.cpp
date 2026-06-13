@@ -197,7 +197,7 @@ bool dc_boot_load_rom() {
     std::array<uint8_t, ROM_HEADER_BYTES> header{};
     if (!dreamcast::gdrom_read_file_at(DC_ROM_PATH, 0, header.data(), header.size())) {
         recompui::show_error_screen("Disc Read Error",
-                                    "Failed to read rom.z64 from the disc.");
+                                    "Failed to read rom.z64 header from the disc.");
         return false;
     }
 
@@ -373,6 +373,10 @@ int main(int argc, char** argv) {
         dreamcast::platform_shutdown();
         return EXIT_FAILURE;
     }
+
+    // Open the boot launcher overlay. The game will run in the background
+    // but input will be captured by the UI until the user selects Start.
+    recompui::open_main_menu(true);
 
     recomp::start(
         project_version,

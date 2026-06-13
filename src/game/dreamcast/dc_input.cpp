@@ -93,6 +93,13 @@ constexpr uint16_t N64_BTN_CD      = 0x0004;
 constexpr uint16_t N64_BTN_CL      = 0x0002;
 constexpr uint16_t N64_BTN_CR      = 0x0001;
 
+// ── InputField Constants ────────────────────────────────────────────
+constexpr uint32_t DC_INPUT_TYPE_BUTTON = 100;
+constexpr uint32_t DC_INPUT_TYPE_TRIGGER = 101;
+constexpr int32_t DC_L_TRIGGER = 0;
+constexpr int32_t DC_R_TRIGGER = 1;
+
+
 // Apply a radial deadzone to the raw DC stick axes (each -128..127, with the
 // caller pre-negating Y for the N64 up=positive convention) and return a
 // normalized vector in the unit disk. A radial deadzone — rather than the
@@ -116,36 +123,7 @@ void normalize_stick_radial(int raw_x, int raw_y, float deadzone, float& out_x, 
     out_y = ry / mag * scaled;
 }
 
-// Map DC buttons to N64 buttons
-uint16_t map_buttons(uint32_t dc_buttons, float trigger_l, float trigger_r) {
-    uint16_t n64 = 0;
-
-    // Face buttons
-    if (dc_buttons & DC_BTN_A)     n64 |= N64_BTN_A;
-    if (dc_buttons & DC_BTN_B)     n64 |= N64_BTN_B;
-    if (dc_buttons & DC_BTN_START) n64 |= N64_BTN_START;
-
-    // X → C-Down, Y → C-Left: the two most-used item buttons on the face,
-    // for convenience.
-    if (dc_buttons & DC_BTN_X)     n64 |= N64_BTN_CD;
-    if (dc_buttons & DC_BTN_Y)     n64 |= N64_BTN_CL;
-
-    // The D-pad drives the full N64 C-button cluster (camera + the third item
-    // slot). Without this, C-Up and C-Right would be unreachable, since the
-    // Dreamcast pad has no second stick. The N64 D-pad is unused in normal
-    // Majora's Mask gameplay, so nothing is lost by repurposing it here.
-    if (dc_buttons & DC_BTN_DPAD_UP)    n64 |= N64_BTN_CU;
-    if (dc_buttons & DC_BTN_DPAD_DOWN)  n64 |= N64_BTN_CD;
-    if (dc_buttons & DC_BTN_DPAD_LEFT)  n64 |= N64_BTN_CL;
-    if (dc_buttons & DC_BTN_DPAD_RIGHT) n64 |= N64_BTN_CR;
-
-    // Analog triggers: L → N64 Z (targeting), R → N64 R (shield)
-    if (trigger_l > 0.5f) n64 |= N64_BTN_Z;
-    if (trigger_r > 0.5f) n64 |= N64_BTN_R;
-
-    return n64;
-}
-
+// (map_buttons has been removed in favor of dynamic polling in maple_get_buttons)
 } // anonymous namespace
 
 namespace recomp {
@@ -177,14 +155,17 @@ void maple_poll() {
     // Edge detection prevents a held D-pad from racing through entries.
     const uint32_t pressed = state->buttons & ~prev_buttons;
     prev_buttons = state->buttons;
+    float trigger_l = static_cast<float>(state->ltrig) / 255.0f;
+    float trigger_r = static_cast<float>(state->rtrig) / 255.0f;
+
     if (recompui::is_any_context_shown()) {
-        recompui::handle_menu_input(pressed);
+        recompui::handle_menu_input(pressed, trigger_l, trigger_r);
     } else if ((pressed & DC_BTN_START) && state->ltrig > 128 && state->rtrig > 128) {
         // L + R + Start opens the in-game options menu. This combo is unlikely
         // during normal play (Start alone stays mapped to the N64 Start button),
         // and gives the player a way to edit the VMU-persisted settings without
         // a PC-style launcher.
-        recompui::open_config_menu();
+        recompui::open_main_menu(false);
     }
 
     // Apply the user-configured deadzone (stored as an integer percentage).
@@ -194,10 +175,7 @@ void maple_poll() {
     dc_controller.trigger_l = static_cast<float>(state->ltrig) / 255.0f;
     dc_controller.trigger_r = static_cast<float>(state->rtrig) / 255.0f;
 
-    // Map to N64
-    dc_controller.n64_buttons = map_buttons(state->buttons, dc_controller.trigger_l, dc_controller.trigger_r);
-    dc_controller.n64_x = dc_controller.joy_x;
-    dc_controller.n64_y = dc_controller.joy_y;
+    // Note: N64 mapping is now evaluated in maple_get_buttons based on bindings.
 
     // Handle rumble
     bool should_rumble = rumble_requested.load(std::memory_order_relaxed);
@@ -232,9 +210,35 @@ bool maple_get_buttons(uint16_t* buttons_out, float* x_out, float* y_out) {
         return false;
     }
 
-    *buttons_out = dc_controller.n64_buttons;
-    *x_out = dc_controller.n64_x;
-    *y_out = dc_controller.n64_y;
+    uint16_t n64 = 0;
+    auto check_btn = [](recomp::GameInput gi, uint16_t mask, uint16_t& out) {
+        if (recomp::get_input_digital(recomp::get_input_binding(gi, 0, recomp::InputDevice::Controller)) ||
+            recomp::get_input_digital(recomp::get_input_binding(gi, 1, recomp::InputDevice::Controller))) {
+            out |= mask;
+        }
+    };
+
+    check_btn(recomp::GameInput::A, N64_BTN_A, n64);
+    check_btn(recomp::GameInput::B, N64_BTN_B, n64);
+    check_btn(recomp::GameInput::Z, N64_BTN_Z, n64);
+    check_btn(recomp::GameInput::START, N64_BTN_START, n64);
+    check_btn(recomp::GameInput::C_UP, N64_BTN_CU, n64);
+    check_btn(recomp::GameInput::C_DOWN, N64_BTN_CD, n64);
+    check_btn(recomp::GameInput::C_LEFT, N64_BTN_CL, n64);
+    check_btn(recomp::GameInput::C_RIGHT, N64_BTN_CR, n64);
+    check_btn(recomp::GameInput::L, N64_BTN_L, n64);
+    check_btn(recomp::GameInput::R, N64_BTN_R, n64);
+    check_btn(recomp::GameInput::DPAD_UP, N64_BTN_DU, n64);
+    check_btn(recomp::GameInput::DPAD_DOWN, N64_BTN_DD, n64);
+    check_btn(recomp::GameInput::DPAD_LEFT, N64_BTN_DL, n64);
+    check_btn(recomp::GameInput::DPAD_RIGHT, N64_BTN_DR, n64);
+
+    *buttons_out = n64;
+    
+    // Analog input: using the pre-deadzoned stick coordinates directly.
+    // If future mapping for analog is required, we would evaluate X_AXIS_POS etc.
+    *x_out = dc_controller.joy_x;
+    *y_out = dc_controller.joy_y;
     return true;
 }
 
@@ -304,20 +308,60 @@ ultramodern::input::connected_device_info_t get_connected_device_info(int contro
 // return zero / false for all binding queries. Actual input is returned by
 // get_n64_input() above, which reads directly from the Maple bus.
 
-float get_input_analog(const InputField& /*field*/) {
+float get_input_analog(const InputField& field) {
+    if (field.input_type == DC_INPUT_TYPE_TRIGGER) {
+        if (field.input_id == DC_L_TRIGGER) return dc_controller.trigger_l;
+        if (field.input_id == DC_R_TRIGGER) return dc_controller.trigger_r;
+    }
     return 0.0f;
 }
 
-float get_input_analog(const std::span<const InputField> /*fields*/) {
-    return 0.0f;
+float get_input_analog(const std::span<const InputField> fields) {
+    float ret = 0.0f;
+    for (const auto& field : fields) {
+        ret += get_input_analog(field);
+    }
+    return std::clamp(ret, 0.0f, 1.0f);
 }
 
-bool get_input_digital(const InputField& /*field*/) {
+bool get_input_digital(const InputField& field) {
+    if (field.input_type == DC_INPUT_TYPE_BUTTON) {
+        return (dc_controller.buttons & field.input_id) != 0;
+    }
+    if (field.input_type == DC_INPUT_TYPE_TRIGGER) {
+        return get_input_analog(field) > 0.5f;
+    }
     return false;
 }
 
-bool get_input_digital(const std::span<const InputField> /*fields*/) {
-    return false;
+bool get_input_digital(const std::span<const InputField> fields) {
+    bool ret = false;
+    for (const auto& field : fields) {
+        ret |= get_input_digital(field);
+    }
+    return ret;
+}
+
+std::string InputField::to_string() const {
+    if (input_type == DC_INPUT_TYPE_BUTTON) {
+        switch (input_id) {
+            case DC_BTN_A: return "A";
+            case DC_BTN_B: return "B";
+            case DC_BTN_X: return "X";
+            case DC_BTN_Y: return "Y";
+            case DC_BTN_START: return "Start";
+            case DC_BTN_DPAD_UP: return "D-Pad Up";
+            case DC_BTN_DPAD_DOWN: return "D-Pad Down";
+            case DC_BTN_DPAD_LEFT: return "D-Pad Left";
+            case DC_BTN_DPAD_RIGHT: return "D-Pad Right";
+            default: return "Unknown";
+        }
+    }
+    if (input_type == DC_INPUT_TYPE_TRIGGER) {
+        if (input_id == DC_L_TRIGGER) return "L Trigger";
+        if (input_id == DC_R_TRIGGER) return "R Trigger";
+    }
+    return "";
 }
 
 // Gyro, mouse, and right-stick are not present on the standard Dreamcast
@@ -441,7 +485,29 @@ void set_background_input_mode(BackgroundInputMode mode) {
 
 namespace recomp {
 const DefaultN64Mappings default_n64_keyboard_mappings = {};
-const DefaultN64Mappings default_n64_controller_mappings = {};
+const DefaultN64Mappings default_n64_controller_mappings = {
+    .a = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_A}},
+    .b = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_B}},
+    .l = {},
+    .r = {InputField{DC_INPUT_TYPE_TRIGGER, DC_R_TRIGGER}},
+    .z = {InputField{DC_INPUT_TYPE_TRIGGER, DC_L_TRIGGER}},
+    .start = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_START}},
+    .c_left = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_Y}, InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_DPAD_LEFT}},
+    .c_right = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_DPAD_RIGHT}},
+    .c_up = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_DPAD_UP}},
+    .c_down = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_X}, InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_DPAD_DOWN}},
+    .dpad_left = {},
+    .dpad_right = {},
+    .dpad_up = {},
+    .dpad_down = {},
+    .analog_left = {},
+    .analog_right = {},
+    .analog_up = {},
+    .analog_down = {},
+    .toggle_menu = {},
+    .accept_menu = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_A}},
+    .apply_menu = {InputField{DC_INPUT_TYPE_BUTTON, DC_BTN_A}}
+};
 } // namespace recomp
 
 #endif // DREAMCAST

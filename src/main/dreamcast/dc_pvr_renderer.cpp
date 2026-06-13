@@ -193,7 +193,7 @@ void Renderer::ensure_list(int list_type) {
 
     flush_batch();
     close_list();
-    pvr_list_begin(list_type);
+    pvr_list_begin(static_cast<pvr_list_t>(list_type));
     list_open_ = true;
     current_list_ = list_type;
     batch_hdr_valid_ = false;
@@ -238,6 +238,25 @@ void Renderer::submit_vertex_dr(const pvr_vertex_t& vert) {
     pvr_dr_commit(dst);
 }
 
+// Submit all 3 triangle vertices in one tight call to reduce overhead.
+// v2 must have flags = PVR_CMD_VERTEX_EOL already set.
+void Renderer::submit_triangle_verts_dr(
+    const pvr_vertex_t& v0,
+    const pvr_vertex_t& v1,
+    const pvr_vertex_t& v2) {
+    begin_dr();
+    pvr_vertex_t* dst;
+    dst = static_cast<pvr_vertex_t*>(pvr_dr_target(dr_state_));
+    *dst = v0;
+    pvr_dr_commit(dst);
+    dst = static_cast<pvr_vertex_t*>(pvr_dr_target(dr_state_));
+    *dst = v1;
+    pvr_dr_commit(dst);
+    dst = static_cast<pvr_vertex_t*>(pvr_dr_target(dr_state_));
+    *dst = v2;
+    pvr_dr_commit(dst);
+}
+
 void Renderer::apply_wrap_modes(pvr_poly_cxt_t& cxt, uint8_t cms, uint8_t cmt) const {
     const bool clamp_u = (cms & G_TX_CLAMP) != 0;
     const bool clamp_v = (cmt & G_TX_CLAMP) != 0;
@@ -262,10 +281,10 @@ void Renderer::begin_batch(const BatchKey& key) {
 
     pvr_poly_cxt_t cxt;
     if (key.textured) {
-        pvr_poly_cxt_txr(&cxt, key.list_type, key.pvr_format, key.tex_stride, key.tex_height, key.texture_vram, PVR_FILTER_NONE);
+        pvr_poly_cxt_txr(&cxt, static_cast<pvr_list_t>(key.list_type), key.pvr_format, key.tex_stride, key.tex_height, key.texture_vram, PVR_FILTER_NONE);
         apply_wrap_modes(cxt, key.cms, key.cmt);
     } else {
-        pvr_poly_cxt_col(&cxt, key.list_type);
+        pvr_poly_cxt_col(&cxt, static_cast<pvr_list_t>(key.list_type));
     }
 
     cxt.gen.shading = key.gouraud ? PVR_SHADE_GOURAUD : PVR_SHADE_FLAT;
@@ -274,7 +293,7 @@ void Renderer::begin_batch(const BatchKey& key) {
         cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
         cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
     } else {
-        cxt.depth.comparison = key.depth_compare;
+        cxt.depth.comparison = static_cast<pvr_depthcmp_mode_t>(key.depth_compare);
         cxt.depth.write = key.depth_write ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
     }
     if (key.punch_through) {
@@ -284,8 +303,8 @@ void Renderer::begin_batch(const BatchKey& key) {
         }
     }
     if (key.blend_enable) {
-        cxt.blend.src = key.blend_src;
-        cxt.blend.dst = key.blend_dst;
+        cxt.blend.src = static_cast<pvr_blend_mode_t>(key.blend_src);
+        cxt.blend.dst = static_cast<pvr_blend_mode_t>(key.blend_dst);
     }
 
     pvr_poly_compile(&batch_hdr_, &cxt);
@@ -396,34 +415,36 @@ void Renderer::submit_triangle(
     pvr_vertex_t vert{};
     vert.oargb = 0;
 
-    vert.flags = PVR_CMD_VERTEX;
-    vert.x = map_x(x0);
-    vert.y = map_y(y0);
-    vert.z = z0;
-    vert.argb = c0;
-    submit_vertex_dr(vert);
+    pvr_vertex_t v0 = vert;
+    v0.flags = PVR_CMD_VERTEX;
+    v0.x = map_x(x0);
+    v0.y = map_y(y0);
+    v0.z = z0;
+    v0.argb = c0;
 
-    vert.x = map_x(x1);
-    vert.y = map_y(y1);
-    vert.z = z1;
-    vert.argb = c1;
-    submit_vertex_dr(vert);
+    pvr_vertex_t v1 = vert;
+    v1.flags = PVR_CMD_VERTEX;
+    v1.x = map_x(x1);
+    v1.y = map_y(y1);
+    v1.z = z1;
+    v1.argb = c1;
 
-    vert.flags = PVR_CMD_VERTEX_EOL;
-    vert.x = map_x(x2);
-    vert.y = map_y(y2);
-    vert.z = z2;
-    vert.argb = c2;
-    submit_vertex_dr(vert);
+    pvr_vertex_t v2 = vert;
+    v2.flags = PVR_CMD_VERTEX_EOL;
+    v2.x = map_x(x2);
+    v2.y = map_y(y2);
+    v2.z = z2;
+    v2.argb = c2;
+    submit_triangle_verts_dr(v0, v1, v2);
 
     record_depth_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2, zbuffer_enabled, use_blend.translucent);
     drew_geometry_ = true;
 }
 
 void Renderer::submit_textured_triangle(
-    float x0, float y0, float z0, float u0, float v0, uint32_t argb0,
-    float x1, float y1, float z1, float u1, float v1, uint32_t argb1,
-    float x2, float y2, float z2, float u2, float v2, uint32_t argb2,
+    float x0, float y0, float z0, float u0, float tv0, uint32_t argb0,
+    float x1, float y1, float z1, float u1, float tv1, uint32_t argb1,
+    float x2, float y2, float z2, float u2, float tv2, uint32_t argb2,
     const tex::Surface& texture,
     const rdp::BlendState& blend,
     bool zbuffer_enabled) {
@@ -462,31 +483,33 @@ void Renderer::submit_textured_triangle(
     pvr_vertex_t vert{};
     vert.oargb = 0;
 
-    vert.flags = PVR_CMD_VERTEX;
-    vert.x = map_x(x0);
-    vert.y = map_y(y0);
-    vert.z = z0;
-    vert.u = u0;
-    vert.v = v0;
-    vert.argb = c0;
-    submit_vertex_dr(vert);
+    pvr_vertex_t v0 = vert;
+    v0.flags = PVR_CMD_VERTEX;
+    v0.x = map_x(x0);
+    v0.y = map_y(y0);
+    v0.z = z0;
+    v0.u = u0;
+    v0.v = tv0;
+    v0.argb = c0;
 
-    vert.x = map_x(x1);
-    vert.y = map_y(y1);
-    vert.z = z1;
-    vert.u = u1;
-    vert.v = v1;
-    vert.argb = c1;
-    submit_vertex_dr(vert);
+    pvr_vertex_t v1 = vert;
+    v1.flags = PVR_CMD_VERTEX;
+    v1.x = map_x(x1);
+    v1.y = map_y(y1);
+    v1.z = z1;
+    v1.u = u1;
+    v1.v = tv1;
+    v1.argb = c1;
 
-    vert.flags = PVR_CMD_VERTEX_EOL;
-    vert.x = map_x(x2);
-    vert.y = map_y(y2);
-    vert.z = z2;
-    vert.u = u2;
-    vert.v = v2;
-    vert.argb = c2;
-    submit_vertex_dr(vert);
+    pvr_vertex_t v2 = vert;
+    v2.flags = PVR_CMD_VERTEX_EOL;
+    v2.x = map_x(x2);
+    v2.y = map_y(y2);
+    v2.z = z2;
+    v2.u = u2;
+    v2.v = tv2;
+    v2.argb = c2;
+    submit_triangle_verts_dr(v0, v1, v2);
 
     record_depth_triangle(x0, y0, z0, x1, y1, z1, x2, y2, z2, zbuffer_enabled, use_blend.translucent);
     drew_geometry_ = true;

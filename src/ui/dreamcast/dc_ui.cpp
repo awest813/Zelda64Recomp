@@ -63,6 +63,13 @@ struct MenuState {
 
 static MenuState current_menu{};
 
+static recomp::GameInput scanning_input = recomp::GameInput::COUNT;
+// Also defined in dc_input.cpp, redefined here for setting bindings
+constexpr uint32_t DC_INPUT_TYPE_BUTTON = 100;
+constexpr uint32_t DC_INPUT_TYPE_TRIGGER = 101;
+constexpr int32_t DC_L_TRIGGER = 0;
+constexpr int32_t DC_R_TRIGGER = 1;
+
 // Colors (ARGB packed)
 constexpr uint32_t COLOR_WHITE      = 0xFFFFFFFF;
 constexpr uint32_t COLOR_YELLOW     = 0xFFFFFF00;
@@ -279,7 +286,71 @@ MenuEntry make_enum_option(std::string label, Get get, Set set,
 
 } // anonymous namespace
 
-void open_config_menu() {
+// Forward declarations
+void open_main_menu(bool is_boot = false);
+void open_config_menu(bool from_main_menu = false);
+
+void open_controller_mapping_menu(bool from_main_menu) {
+    using namespace recomp;
+    current_menu.title = "Controller Mapping";
+    current_menu.entries.clear();
+    current_menu.selected_index = 0;
+
+    auto add_mapping_entry = [&](GameInput gi, const char* label) {
+        MenuEntry m;
+        m.label = label;
+        m.enabled = true;
+        m.value_fn = [gi]() {
+            if (scanning_input == gi) return std::string("Press Button...");
+            return get_input_binding(gi, 0, InputDevice::Controller).to_string();
+        };
+        m.action = [gi]() {
+            scanning_input = gi;
+        };
+        current_menu.entries.push_back(std::move(m));
+    };
+
+    add_mapping_entry(GameInput::A, "A Button");
+    add_mapping_entry(GameInput::B, "B Button");
+    add_mapping_entry(GameInput::C_UP, "C-Up");
+    add_mapping_entry(GameInput::C_DOWN, "C-Down");
+    add_mapping_entry(GameInput::C_LEFT, "C-Left");
+    add_mapping_entry(GameInput::C_RIGHT, "C-Right");
+    add_mapping_entry(GameInput::Z, "Z Target");
+    add_mapping_entry(GameInput::R, "R Shield");
+    add_mapping_entry(GameInput::START, "Start");
+    add_mapping_entry(GameInput::DPAD_UP, "D-Pad Up");
+    add_mapping_entry(GameInput::DPAD_DOWN, "D-Pad Down");
+    add_mapping_entry(GameInput::DPAD_LEFT, "D-Pad Left");
+    add_mapping_entry(GameInput::DPAD_RIGHT, "D-Pad Right");
+
+    MenuEntry reset_m;
+    reset_m.label = "Reset to Defaults";
+    reset_m.enabled = true;
+    reset_m.action = []() {
+        zelda64::reset_cont_input_bindings();
+    };
+    current_menu.entries.push_back(std::move(reset_m));
+
+    MenuEntry back_m;
+    back_m.label = "Back";
+    back_m.enabled = true;
+    back_m.action = [from_main_menu]() {
+        scanning_input = GameInput::COUNT;
+        zelda64::save_config();
+        if (from_main_menu) {
+            open_main_menu(false);
+        } else {
+            open_config_menu(false);
+        }
+    };
+    current_menu.entries.push_back(std::move(back_m));
+    
+    current_menu.cancel_action = back_m.action;
+    current_menu.visible = true;
+}
+
+void open_config_menu(bool from_main_menu) {
     using namespace zelda64;
 
     current_menu.title = "Options";
@@ -358,21 +429,18 @@ void open_config_menu() {
         e.push_back(std::move(m));
     }
 
+    // Removing Controller Mapping to move it to the Main Menu
+
     // Closing the menu (Back or B) persists everything to the VMU.
-    auto save_and_close = []() {
+    auto save_and_close = [from_main_menu]() {
         zelda64::save_config();
-        current_menu.visible = false;
+        if (from_main_menu) {
+            open_main_menu(false);
+        } else {
+            current_menu.visible = false;
+        }
     };
-    {
-        MenuEntry m;
-        m.label = "Quit Game";
-        m.enabled = true;
-        m.action = []() {
-            zelda64::save_config();
-            zelda64::open_quit_game_prompt();
-        };
-        e.push_back(std::move(m));
-    }
+    // Quit Game is moved to the Main Menu
     {
         MenuEntry m;
         m.label = "Back (save)";
@@ -382,6 +450,67 @@ void open_config_menu() {
     }
 
     current_menu.cancel_action = save_and_close;
+    current_menu.visible = true;
+}
+
+void open_main_menu(bool is_boot) {
+    using namespace zelda64;
+
+    current_menu.title = is_boot ? "Zelda64 Recompiled" : "Paused";
+    current_menu.entries.clear();
+    current_menu.selected_index = 0;
+
+    auto& e = current_menu.entries;
+
+    {
+        MenuEntry m;
+        m.label = is_boot ? "Start Game" : "Resume Game";
+        m.enabled = true;
+        m.action = []() {
+            current_menu.visible = false;
+        };
+        e.push_back(std::move(m));
+    }
+    
+    {
+        MenuEntry m;
+        m.label = "Options";
+        m.enabled = true;
+        m.action = [is_boot]() {
+            open_config_menu(true);
+        };
+        e.push_back(std::move(m));
+    }
+    
+    {
+        MenuEntry m;
+        m.label = "Controller Mapping";
+        m.enabled = true;
+        m.action = [is_boot]() {
+            open_controller_mapping_menu(true);
+        };
+        e.push_back(std::move(m));
+    }
+
+    // Only show Quit if we're not in the boot launcher
+    if (!is_boot) {
+        MenuEntry m;
+        m.label = "Quit Game";
+        m.enabled = true;
+        m.action = []() {
+            zelda64::save_config();
+            zelda64::open_quit_game_prompt();
+        };
+        e.push_back(std::move(m));
+    }
+
+    auto cancel_action = [is_boot]() {
+        if (!is_boot) {
+            current_menu.visible = false;
+        }
+    };
+    
+    current_menu.cancel_action = cancel_action;
     current_menu.visible = true;
 }
 
@@ -681,8 +810,30 @@ void render_menu_overlay() {
 // ── Menu input handling ───────────────────────────────────────────────
 // Called from the input polling path with raw Dreamcast button bitmask.
 
-void handle_menu_input(uint32_t buttons_pressed) {
+void handle_menu_input(uint32_t buttons_pressed, float trigger_l, float trigger_r) {
     if (!current_menu.visible || current_menu.entries.empty()) return;
+
+    if (scanning_input != recomp::GameInput::COUNT) {
+        recomp::InputField field{};
+        
+        if (buttons_pressed & CONT_A) field = {DC_INPUT_TYPE_BUTTON, CONT_A};
+        else if (buttons_pressed & CONT_B) field = {DC_INPUT_TYPE_BUTTON, CONT_B};
+        else if (buttons_pressed & CONT_X) field = {DC_INPUT_TYPE_BUTTON, CONT_X};
+        else if (buttons_pressed & CONT_Y) field = {DC_INPUT_TYPE_BUTTON, CONT_Y};
+        else if (buttons_pressed & CONT_START) field = {DC_INPUT_TYPE_BUTTON, CONT_START};
+        else if (buttons_pressed & CONT_DPAD_UP) field = {DC_INPUT_TYPE_BUTTON, CONT_DPAD_UP};
+        else if (buttons_pressed & CONT_DPAD_DOWN) field = {DC_INPUT_TYPE_BUTTON, CONT_DPAD_DOWN};
+        else if (buttons_pressed & CONT_DPAD_LEFT) field = {DC_INPUT_TYPE_BUTTON, CONT_DPAD_LEFT};
+        else if (buttons_pressed & CONT_DPAD_RIGHT) field = {DC_INPUT_TYPE_BUTTON, CONT_DPAD_RIGHT};
+        else if (trigger_l > 0.5f) field = {DC_INPUT_TYPE_TRIGGER, DC_L_TRIGGER};
+        else if (trigger_r > 0.5f) field = {DC_INPUT_TYPE_TRIGGER, DC_R_TRIGGER};
+
+        if (field.input_type != 0) {
+            recomp::set_input_binding(scanning_input, 0, recomp::InputDevice::Controller, field);
+            scanning_input = recomp::GameInput::COUNT;
+        }
+        return;
+    }
 
     if (buttons_pressed & CONT_DPAD_UP) {
         current_menu.selected_index--;

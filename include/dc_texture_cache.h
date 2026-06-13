@@ -65,6 +65,7 @@ public:
 
     void set_frame(uint32_t frame);
     void flush();
+    uint32_t generation() const { return generation_; }
 
     Surface upload(const LoadedTexture& tex, const TileState& tile, const uint8_t* palette);
 
@@ -89,6 +90,7 @@ private:
     size_t entry_count_ = 0;
     size_t vram_used_ = 0;
     uint32_t current_frame_ = 0;
+    uint32_t generation_ = 0;
 
     void evict_lru(size_t bytes_needed);
 };

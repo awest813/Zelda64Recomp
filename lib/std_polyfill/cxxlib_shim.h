@@ -1,7 +1,11 @@
 // C++ library shims for KOS GCC 9 / newlib (syntax-check and Dreamcast builds).
 #pragma once
 
+#ifdef __cplusplus
+
+#if defined(__GNUC__) && (__GNUC__ < 10)
 #include <string>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +22,7 @@ inline int fesetround(int) { return 0; }
 #endif
 
 // newlib exposes C99 math/stdio in the global namespace only.
+#if defined(__GNUC__) && (__GNUC__ < 10)
 namespace std {
 using ::snprintf;
 using ::strtof;
@@ -29,6 +34,7 @@ inline unsigned long long stoull(const std::string& str, std::size_t* idx = null
     return ::strtoull(str.c_str(), idx != nullptr ? reinterpret_cast<char**>(idx) : nullptr, base);
 }
 } // namespace std
+#endif
 
 #if defined(__GNUC__) && (__GNUC__ < 10)
 namespace std {
@@ -77,3 +83,5 @@ public:
 #endif
 } // namespace std
 #endif
+
+#endif // __cplusplus

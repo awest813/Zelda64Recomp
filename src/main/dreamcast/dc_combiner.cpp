@@ -33,7 +33,8 @@ struct Cycle {
 };
 
 uint8_t mul_u8(uint8_t a, uint8_t b) {
-    return static_cast<uint8_t>((static_cast<uint16_t>(a) * b) / 255u);
+    const uint16_t x = static_cast<uint16_t>(a) * b;
+    return static_cast<uint8_t>((x + 1 + (x >> 8)) >> 8);
 }
 
 uint8_t sub_u8(uint8_t a, uint8_t b) {
@@ -172,11 +173,16 @@ uint32_t evaluate(uint64_t combine_mode, const Inputs& in, bool cycle2) {
              | static_cast<uint32_t>(in.shade.b);
     }
 
-    Cycle rgb0{};
-    Cycle alpha0{};
-    Cycle rgb1{};
-    Cycle alpha1{};
-    decode_cycles(combine_mode, rgb0, alpha0, rgb1, alpha1);
+    static uint64_t last_combine_mode = ~0ULL;
+    static Cycle rgb0{};
+    static Cycle alpha0{};
+    static Cycle rgb1{};
+    static Cycle alpha1{};
+
+    if (combine_mode != last_combine_mode) {
+        decode_cycles(combine_mode, rgb0, alpha0, rgb1, alpha1);
+        last_combine_mode = combine_mode;
+    }
 
     ColorSource empty{};
     ColorSource combined = eval_cycle_rgb(rgb0, in, empty);
@@ -200,7 +206,8 @@ bool uses_texel0(uint64_t combine_mode) {
     Cycle rgb0{}, alpha0{}, rgb1{}, alpha1{};
     decode_cycles(combine_mode, rgb0, alpha0, rgb1, alpha1);
     const auto uses = [](const Cycle& c) {
-        return mux_uses_texture(c.a) || mux_uses_texture(c.b) || mux_uses_texture(c.c) || mux_uses_texture(c.d);
+        return c.a == G_CCMUX_TEXEL0 || c.b == G_CCMUX_TEXEL0 || c.c == G_CCMUX_TEXEL0 || c.d == G_CCMUX_TEXEL0
+            || c.a == G_CCMUX_TEXEL0_ALPHA || c.b == G_CCMUX_TEXEL0_ALPHA || c.c == G_CCMUX_TEXEL0_ALPHA || c.d == G_CCMUX_TEXEL0_ALPHA;
     };
     return uses(rgb0) || uses(alpha0) || uses(rgb1) || uses(alpha1);
 }

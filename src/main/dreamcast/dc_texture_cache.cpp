@@ -225,6 +225,7 @@ void Cache::flush() {
     }
     entry_count_ = 0;
     vram_used_ = 0;
+    generation_++;
 }
 
 void Cache::evict_lru(size_t bytes_needed) {

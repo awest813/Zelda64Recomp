@@ -243,7 +243,7 @@ void PVRContext::init_pvr() {
           PVR_BINSIZE_16,  // Translucent polygons
           PVR_BINSIZE_0,   // Translucent modifier volumes (disabled)
           PVR_BINSIZE_8 }, // Punch-through (G_AC_THRESHOLD)
-        512 * 1024,        // Vertex buffer size (512 KB; rest of VRAM for textures/FB)
+        1024 * 1024,       // Vertex buffer size (1 MB; N64 busy scenes need headroom)
         0,                 // No DMA
         0,                 // No FSAA
         0                  // Disable translucent auto-sort (we sort manually)
@@ -402,7 +402,9 @@ bool PVRContext::upload_framebuffer_texture(const DecodedVI& vi) {
     }
 
     const uint32_t n64_stride_pixels = vi.width;
-    fb_upload_buffer_.assign(static_cast<size_t>(fb_tex_stride_) * fb_tex_height_, 0);
+    // The conversion loops below overwrite every active pixel.
+    // Only clear stride-padding columns if there's a gap between width and stride.
+    const bool has_padding = (fb_tex_stride_ > vi.width);
 
     if (vi.is_32bit) {
         const uint32_t* src = reinterpret_cast<const uint32_t*>(rdram_ + vi.origin);
@@ -410,6 +412,9 @@ bool PVRContext::upload_framebuffer_texture(const DecodedVI& vi) {
             const uint32_t* row_src = src + static_cast<size_t>(y) * n64_stride_pixels;
             uint16_t* row_dst = fb_upload_buffer_.data() + static_cast<size_t>(y) * fb_tex_stride_;
             convert_rgba32_to_argb1555(row_src, row_dst, vi.width);
+            if (has_padding) {
+                std::memset(row_dst + vi.width, 0, (fb_tex_stride_ - vi.width) * sizeof(uint16_t));
+            }
         }
     } else {
         const uint16_t* src = reinterpret_cast<const uint16_t*>(rdram_ + vi.origin);
@@ -417,6 +422,9 @@ bool PVRContext::upload_framebuffer_texture(const DecodedVI& vi) {
             const uint16_t* row_src = src + static_cast<size_t>(y) * n64_stride_pixels;
             uint16_t* row_dst = fb_upload_buffer_.data() + static_cast<size_t>(y) * fb_tex_stride_;
             convert_rgba16_to_argb1555(row_src, row_dst, vi.width);
+            if (has_padding) {
+                std::memset(row_dst + vi.width, 0, (fb_tex_stride_ - vi.width) * sizeof(uint16_t));
+            }
         }
     }
 

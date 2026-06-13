@@ -30,9 +30,10 @@ namespace {
 // ── Ring buffer for audio samples ───────────────────────────────────
 // The game thread queues samples here; the AICA stream callback drains them.
 
-constexpr size_t RING_BUFFER_FRAMES = 4096;   // Frames (stereo pairs)
+constexpr size_t RING_BUFFER_FRAMES = 4096;   // Frames (stereo pairs) — MUST be power of 2
 constexpr size_t RING_BUFFER_CHANNELS = 2;
-constexpr size_t RING_BUFFER_SIZE = RING_BUFFER_FRAMES * RING_BUFFER_CHANNELS;
+constexpr size_t RING_BUFFER_SIZE = RING_BUFFER_FRAMES * RING_BUFFER_CHANNELS; // 8192 — power of 2
+constexpr size_t RING_MASK = RING_BUFFER_SIZE - 1; // For fast modulo via bitmasking
 
 static int16_t ring_buffer[RING_BUFFER_SIZE];
 static std::atomic<size_t> ring_write_pos{0};
@@ -73,8 +74,13 @@ void* stream_callback(snd_stream_hnd_t hnd, int smp_req, int* smp_recv) {
     size_t to_copy = (samples_requested < avail) ? samples_requested : avail;
 
     size_t r = ring_read_pos.load(std::memory_order_relaxed);
-    for (size_t i = 0; i < to_copy; i++) {
-        callback_buffer[i] = ring_buffer[(r + i) % RING_BUFFER_SIZE];
+
+    // Two-part memcpy to handle ring buffer wrap-around.
+    const size_t part1 = std::min(to_copy, RING_BUFFER_SIZE - r); // samples until wrap
+    const size_t part2 = to_copy - part1;
+    std::memcpy(callback_buffer, ring_buffer + r, part1 * sizeof(int16_t));
+    if (part2 > 0) {
+        std::memcpy(callback_buffer + part1, ring_buffer, part2 * sizeof(int16_t));
     }
 
     // Fill remainder with silence if we underran
@@ -82,7 +88,7 @@ void* stream_callback(snd_stream_hnd_t hnd, int smp_req, int* smp_recv) {
         memset(&callback_buffer[to_copy], 0, (samples_requested - to_copy) * sizeof(int16_t));
     }
 
-    ring_read_pos.store((r + to_copy) % RING_BUFFER_SIZE, std::memory_order_release);
+    ring_read_pos.store((r + to_copy) & RING_MASK, std::memory_order_release);
 
     *smp_recv = samples_requested * sizeof(int16_t);
     return callback_buffer;
@@ -147,11 +153,11 @@ void aica_queue_samples(const int16_t* samples, size_t sample_count) {
         if (right > 32767) right = 32767;
         if (right < -32768) right = -32768;
 
-        ring_buffer[(w + i + 0) % RING_BUFFER_SIZE] = static_cast<int16_t>(left);
-        ring_buffer[(w + i + 1) % RING_BUFFER_SIZE] = static_cast<int16_t>(right);
+        ring_buffer[(w + i + 0) & RING_MASK] = static_cast<int16_t>(left);
+        ring_buffer[(w + i + 1) & RING_MASK] = static_cast<int16_t>(right);
     }
 
-    ring_write_pos.store((w + to_write) % RING_BUFFER_SIZE, std::memory_order_release);
+    ring_write_pos.store((w + to_write) & RING_MASK, std::memory_order_release);
 }
 
 size_t aica_get_frames_remaining() {
